@@ -93,7 +93,7 @@ def test_reset_memory_keeps_slots():
     slots = st.slots.clone()
     st.reset_memory()
     assert torch.allclose(st.slots, slots)
-    assert st.seen == 0 and st.pending.shape[1] == 0
+    assert st.seen == 2 * cfg.block                      # la cadence d'écriture continue (spec §4.8)
     assert all(torch.count_nonzero(g[0]) == 0 for g in st.gdn if g is not None)
 
 

@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from .config import RelisConfig
 from .layers import RMSNorm, CausalConv1d
 
+RESET_LOG_ALPHA = -80.0  # porte d'oubli « zéro » : exp(-80) ≈ 1e-35, sans -inf
+
 
 def gdn_step(q, k, v, log_alpha, beta, S):
     """Un pas de récurrence. q,k:(B,H,dk) v:(B,H,dv) log_alpha,beta:(B,H) S:(B,H,dk,dv)."""
@@ -106,7 +108,7 @@ class GatedDeltaNet(nn.Module):
         cs = torch.zeros(B, 3 * self.cfg.inner, self.cfg.conv_kernel - 1, device=device, dtype=torch.float32)
         return S, cs
 
-    def _project(self, x, conv_state):
+    def _project(self, x, conv_state, reset=None):
         B, L, _ = x.shape
         H, dh = self.cfg.n_heads, self.cfg.head_dim
         qkv, conv_state = self.conv(self.qkv(x), conv_state)
@@ -119,6 +121,9 @@ class GatedDeltaNet(nn.Module):
         k = F.normalize(k.float(), dim=-1)
         beta = torch.sigmoid(self.beta_proj(x).float()).transpose(1, 2)               # (B,H,L)
         log_alpha = -self.A_log.float().exp()[None, :, None] * F.softplus(self.dt_proj(x).float()).transpose(1, 2)
+        if reset is not None:
+            # REFRESH exact (spec §4.8) : l'état précédent est annulé à la position marquée
+            log_alpha = log_alpha.masked_fill(reset.to(torch.bool)[:, None, :], RESET_LOG_ALPHA)
         return q, k, v.float(), log_alpha, beta, conv_state
 
     def _output(self, o, x):
@@ -127,14 +132,15 @@ class GatedDeltaNet(nn.Module):
         gate = F.silu(self.gate_proj(x).float())
         return self.o_proj((o * gate).to(x.dtype))
 
-    def forward(self, x, S, conv_state):
+    def forward(self, x, S, conv_state, reset=None):
         if S is None:
             S, conv_state = self.init_state(x.shape[0], x.device)
-        q, k, v, log_alpha, beta, conv_state = self._project(x, conv_state)
+        q, k, v, log_alpha, beta, conv_state = self._project(x, conv_state, reset)
         o, S = gdn_chunked(q, k, v, log_alpha, beta, S, self.cfg.chunk)
         return self._output(o, x), S, conv_state
 
-    def step(self, x, S, conv_state):
-        q, k, v, log_alpha, beta, conv_state = self._project(x, conv_state)
+    def step(self, x, S, conv_state, reset=None):
+        r = None if reset is None else reset.to(torch.bool).reshape(x.shape[0], 1)
+        q, k, v, log_alpha, beta, conv_state = self._project(x, conv_state, r)
         o, S = gdn_step(q[:, :, 0], k[:, :, 0], v[:, :, 0], log_alpha[:, :, 0], beta[:, :, 0], S)
         return self._output(o.unsqueeze(2), x), S, conv_state
