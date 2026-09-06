@@ -1,7 +1,6 @@
 import torch
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
-from relis.model.state import State
 from relis.tape.codes import Mode
 
 

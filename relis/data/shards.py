@@ -4,7 +4,9 @@ from relis.tape import codes as C
 
 
 def encode_document(content: bytes, header: str) -> bytes:
-    return bytes([C.SEG]) + header.encode("utf-8") + bytes([C.HDR]) + C.sanitize(content)
+    # l'en-tête vient de la source : il peut contenir des octets de contrôle du ruban
+    head = C.sanitize(header.encode("utf-8", errors="replace"))
+    return bytes([C.SEG]) + head + bytes([C.HDR]) + C.sanitize(content)
 
 
 class ShardWriter:

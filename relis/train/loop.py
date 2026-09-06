@@ -90,7 +90,8 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
     t_start = time.time()
     model.to(device).train()
     opt = _make_optimizer(model, tcfg)
-    scaler = torch.amp.GradScaler("cuda", enabled=tcfg.amp and device.startswith("cuda"))
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    scaler = torch.amp.GradScaler(device_type, enabled=tcfg.amp and device.startswith("cuda"))
     step = 0
     if resume:
         if tcfg.hub_repo and is_main and not os.path.exists(os.path.join(run_dir, "last.pt")):

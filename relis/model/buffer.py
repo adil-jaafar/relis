@@ -5,7 +5,6 @@ Lecture : chaque bloc fait une cross-attention positions -> slots.
 """
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .config import RelisConfig
 from .layers import RMSNorm
