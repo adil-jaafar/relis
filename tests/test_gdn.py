@@ -71,6 +71,43 @@ def test_state_is_fp32_under_fp16_inputs():
     m = GatedDeltaNet(cfg)
     x = torch.randn(1, 9, cfg.d_model)
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        y, S, _ = m(x, None, None)
-    assert S.dtype == torch.float32
-    assert y.shape == x.shape
+        y_ac, S_ac, _ = m(x, None, None)
+    y_pl, S_pl, _ = m(x, None, None)
+    assert S_ac.dtype == torch.float32
+    assert y_ac.shape == x.shape
+    # The module's qkv/beta/dt linear projections legitimately run in bf16
+    # under autocast (only the GDN recurrence core is forced fp32), so their
+    # rounding perturbs q/k/v/log_alpha/beta slightly before they even reach
+    # gdn_chunked; that perturbation then propagates through 9 recurrent
+    # steps. Measured empirically (see task-4-report.md): this yields an S
+    # difference of ~2.8e-3 with the fp32-forcing fix applied, and an
+    # almost identical ~2.7e-3 without it -- i.e. this end-to-end tolerance
+    # does not discriminate the fix and must stay loose. atol=1e-2 keeps it
+    # meaningful (an order of magnitude under the y tolerance) without being
+    # sensitive to legitimate upstream bf16 rounding.
+    assert torch.allclose(S_ac, S_pl, atol=1e-2)
+    assert torch.allclose(y_ac.float(), y_pl.float(), atol=5e-2)
+
+    # Load-bearing guard: gdn_step/gdn_chunked themselves must ignore an
+    # ambient autocast context entirely when given IDENTICAL fp32 inputs --
+    # this is what actually fails without the internal
+    # `torch.autocast(device_type=..., enabled=False)` wrapper (measured:
+    # ~3.9e-3 / ~2.1e-2 max abs diff on S / o without the wrapper, for the
+    # same seed and shapes below), even though the module-level test above
+    # cannot discriminate it since it never feeds identical inputs to both
+    # branches.
+    q, k, v, la, be, S0 = _inputs(B=1, H=cfg.n_heads, L=9, dk=cfg.head_dim, dv=cfg.head_dim)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        o_ac, S_new_ac = gdn_chunked(q, k, v, la, be, S0, chunk=cfg.chunk)
+    o_pl, S_new_pl = gdn_chunked(q, k, v, la, be, S0, chunk=cfg.chunk)
+    assert o_ac.dtype == torch.float32 and S_new_ac.dtype == torch.float32
+    assert torch.allclose(o_ac, o_pl, atol=1e-5)
+    assert torch.allclose(S_new_ac, S_new_pl, atol=1e-5)
+
+    qt, kt, vt, lat, bet = q[:, :, 0], k[:, :, 0], v[:, :, 0], la[:, :, 0], be[:, :, 0]
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        o_ac2, S_ac2 = gdn_step(qt, kt, vt, lat, bet, S0)
+    o_pl2, S_pl2 = gdn_step(qt, kt, vt, lat, bet, S0)
+    assert o_ac2.dtype == torch.float32 and S_ac2.dtype == torch.float32
+    assert torch.allclose(o_ac2, o_pl2, atol=1e-5)
+    assert torch.allclose(S_ac2, S_pl2, atol=1e-5)

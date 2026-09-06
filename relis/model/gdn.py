@@ -18,9 +18,10 @@ def gdn_step(q, k, v, log_alpha, beta, S):
     q, k, v, S = q.float(), k.float(), v.float(), S.float()
     a = log_alpha.float().exp()[..., None, None]
     b = beta.float()[..., None, None]
-    kS = k.unsqueeze(-2) @ S                                  # (B,H,1,dv)
-    S_new = a * S + b * (k.unsqueeze(-1) @ (v.unsqueeze(-2) - a * kS))
-    o = (q.unsqueeze(-2) @ S_new).squeeze(-2)                 # (B,H,dv)
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        kS = k.unsqueeze(-2) @ S                                  # (B,H,1,dv)
+        S_new = a * S + b * (k.unsqueeze(-1) @ (v.unsqueeze(-2) - a * kS))
+        o = (q.unsqueeze(-2) @ S_new).squeeze(-2)                 # (B,H,dv)
     return o, S_new
 
 
@@ -50,32 +51,33 @@ def gdn_chunked(q, k, v, log_alpha, beta, S, chunk: int):
     log_alpha = log_alpha.view(B, H, N, C)
     beta = beta.view(B, H, N, C)
 
-    lg = torch.cumsum(log_alpha, dim=-1)                       # log γ_t dans le chunk
-    gamma = lg.exp()                                           # (B,H,N,C)
-    diff = lg.unsqueeze(-1) - lg.unsqueeze(-2)                 # (t,i) -> log(γ_t/γ_i)
-    tri_strict = torch.ones(C, C, dtype=torch.bool, device=q.device).tril(-1)
-    tri_incl = torch.ones(C, C, dtype=torch.bool, device=q.device).tril(0)
-    ratio_strict = diff.masked_fill(~tri_strict, float("-inf")).exp()
-    ratio_incl = diff.masked_fill(~tri_incl, float("-inf")).exp()
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        lg = torch.cumsum(log_alpha, dim=-1)                       # log γ_t dans le chunk
+        gamma = lg.exp()                                           # (B,H,N,C)
+        diff = lg.unsqueeze(-1) - lg.unsqueeze(-2)                 # (t,i) -> log(γ_t/γ_i)
+        tri_strict = torch.ones(C, C, dtype=torch.bool, device=q.device).tril(-1)
+        tri_incl = torch.ones(C, C, dtype=torch.bool, device=q.device).tril(0)
+        ratio_strict = diff.masked_fill(~tri_strict, float("-inf")).exp()
+        ratio_incl = diff.masked_fill(~tri_incl, float("-inf")).exp()
 
-    KK = k @ k.transpose(-1, -2)                               # (B,H,N,C,C)
-    M = ratio_strict * beta.unsqueeze(-2) * KK                 # β_i sur la colonne i
-    eye = torch.eye(C, device=q.device, dtype=q.dtype)
-    rhs = eye.expand_as(M).contiguous()
-    T = torch.linalg.solve_triangular(eye + M, rhs, upper=False, unitriangular=True)
-    U = T @ v                                                  # (B,H,N,C,dv)
-    W = T @ (gamma.unsqueeze(-1) * k)                          # (B,H,N,C,dk)
-    P = ratio_incl * beta.unsqueeze(-2) * (q @ k.transpose(-1, -2))
-    gamma_C = gamma[..., -1]                                   # (B,H,N)
-    decay_to_end = (lg[..., -1:] - lg).exp() * beta            # γ_C/γ_i · β_i
+        KK = k @ k.transpose(-1, -2)                               # (B,H,N,C,C)
+        M = ratio_strict * beta.unsqueeze(-2) * KK                 # β_i sur la colonne i
+        eye = torch.eye(C, device=q.device, dtype=q.dtype)
+        rhs = eye.expand_as(M).contiguous()
+        T = torch.linalg.solve_triangular(eye + M, rhs, upper=False, unitriangular=True)
+        U = T @ v                                                  # (B,H,N,C,dv)
+        W = T @ (gamma.unsqueeze(-1) * k)                          # (B,H,N,C,dk)
+        P = ratio_incl * beta.unsqueeze(-2) * (q @ k.transpose(-1, -2))
+        gamma_C = gamma[..., -1]                                   # (B,H,N)
+        decay_to_end = (lg[..., -1:] - lg).exp() * beta            # γ_C/γ_i · β_i
 
-    outs = []
-    for n in range(N):
-        U_eff = U[:, :, n] - W[:, :, n] @ S                    # (B,H,C,dv)
-        O = gamma[:, :, n, :, None] * (q[:, :, n] @ S) + P[:, :, n] @ U_eff
-        S = gamma_C[:, :, n, None, None] * S + k[:, :, n].transpose(-1, -2) @ (decay_to_end[:, :, n, :, None] * U_eff)
-        outs.append(O)
-    o = torch.stack(outs, dim=2).reshape(B, H, Lp, dv)[:, :, :L]
+        outs = []
+        for n in range(N):
+            U_eff = U[:, :, n] - W[:, :, n] @ S                    # (B,H,C,dv)
+            O = gamma[:, :, n, :, None] * (q[:, :, n] @ S) + P[:, :, n] @ U_eff
+            S = gamma_C[:, :, n, None, None] * S + k[:, :, n].transpose(-1, -2) @ (decay_to_end[:, :, n, :, None] * U_eff)
+            outs.append(O)
+        o = torch.stack(outs, dim=2).reshape(B, H, Lp, dv)[:, :, :L]
     return o, S
 
 
