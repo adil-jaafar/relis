@@ -103,6 +103,48 @@ def test_reset_memory_new_semantics():
     assert st.pending.shape[1] == 0 and st.seen == 0
 
 
+def test_slots_reset_alone_gives_fresh_state():
+    cfg, m = _m()
+    L = 2 * cfg.block
+    x = torch.randint(0, 256, (2, L))
+    sreset = torch.zeros(2, L, dtype=torch.bool); sreset[0, cfg.block] = True
+    lb, sb = m(x, int(Mode.SCAN), m.new_state(2, "cpu"), slots_reset=sreset)
+    # échantillon 0 : après la frontière, tout doit égaler un état neuf sur x[0, block:]
+    lf, sf = m(x[0:1, cfg.block:], int(Mode.SCAN), m.new_state(1, "cpu"))
+    assert torch.allclose(lb[0:1, cfg.block:], lf, atol=1e-4)
+    assert torch.allclose(sb.slots[0:1], sf.slots, atol=1e-4)
+    # échantillon 1 : inchangé par rapport à un run sans drapeaux
+    ln, sn = m(x[1:2], int(Mode.SCAN), m.new_state(1, "cpu"))
+    assert torch.allclose(lb[1:2], ln, atol=1e-4)
+    assert torch.allclose(sb.slots[1:2], sn.slots, atol=1e-4)
+
+
+def test_masks_under_grad_checkpoint_match_plain():
+    cfg_plain = RelisConfig.tiny()
+    cfg_ckpt = RelisConfig.tiny(); cfg_ckpt.grad_checkpoint = True
+    m_plain = RelisModel(cfg_plain)
+    m_ckpt = RelisModel(cfg_ckpt)
+    m_ckpt.load_state_dict(m_plain.state_dict())
+    m_plain.train(); m_ckpt.train()
+
+    L = 2 * cfg_plain.block + 7
+    x = torch.randint(0, 256, (2, L))
+    reset = torch.zeros(2, L, dtype=torch.bool); reset[0, 10] = True
+    sreset = torch.zeros(2, L, dtype=torch.bool); sreset[1, cfg_plain.block] = True
+    l_plain, _ = m_plain(x, int(Mode.SCAN), m_plain.new_state(2, "cpu"), reset=reset, slots_reset=sreset)
+    l_ckpt, _ = m_ckpt(x, int(Mode.SCAN), m_ckpt.new_state(2, "cpu"), reset=reset, slots_reset=sreset)
+    assert torch.allclose(l_plain, l_ckpt, atol=1e-5), (l_plain - l_ckpt).abs().max()
+
+    l_plain.float().sum().backward()
+    l_ckpt.float().sum().backward()
+    grads_plain = dict(m_plain.named_parameters())
+    for name, p in m_ckpt.named_parameters():
+        gp = grads_plain[name].grad
+        assert p.grad is not None, name
+        assert gp is not None, name
+        assert torch.allclose(gp, p.grad, atol=1e-5), (name, (gp - p.grad).abs().max())
+
+
 def test_grad_flows_with_masks():
     cfg, m = _m(); m.train()
     L = 2 * cfg.block + 3

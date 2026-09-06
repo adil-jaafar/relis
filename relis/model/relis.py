@@ -131,10 +131,17 @@ class RelisModel(nn.Module):
         return logits, state
 
     def forward(self, x, mode, state: State, reset=None, slots_reset=None):
-        """`reset` et `slots_reset` : bool (B,L) ; voir spec §4.8 et §6.1."""
+        """`reset` et `slots_reset` : bool (B,L) ; voir spec §4.8 et §6.1.
+
+        Un début de ruban (`slots_reset`) implique la réinitialisation de la Mémoire :
+        `reset` est complété automatiquement.
+        """
         B, L = x.shape
         if isinstance(mode, int):
             mode = torch.full((B, L), mode, dtype=torch.long, device=x.device)
+        if slots_reset is not None:
+            sr = slots_reset.to(torch.bool)
+            reset = sr if reset is None else (reset.to(torch.bool) | sr)
         logits = []
         t = 0
         while t < L:
