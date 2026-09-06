@@ -23,9 +23,21 @@ CONT = 0x07
 SKIP = 0x08
 READ = 0x11
 RECALL = 0x13
+NOTE = 0x14
 
 TEXT_CONTROL = frozenset({0x09, 0x0A, 0x0D})
 CONTROL_CODES = frozenset(b for b in range(0x20) if b not in TEXT_CONTROL)
+
+DECISION_CODES = frozenset({READ, SKIP, CONT, STOP, NEXT, END, REFRESH, NOTE})
+
+_NAMES = {ENC: "ENC", SEG: "SEG", END: "END", STOP: "STOP", REFRESH: "REFRESH", NEXT: "NEXT",
+          CONT: "CONT", SKIP: "SKIP", SCAN: "SCAN", GEN: "GEN", DEC: "DEC", READ: "READ",
+          PART: "PART", RECALL: "RECALL", NOTE: "NOTE", CHAN: "CHAN", HDR: "HDR"}
+
+
+def name(b: int) -> str:
+    return _NAMES.get(b, f"0x{b:02x}")
+
 
 REPLACEMENT = b"\xef\xbf\xbd"  # U+FFFD
 

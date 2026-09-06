@@ -50,3 +50,9 @@ def test_extrait_address_out_of_range():
 def test_address_length_lexique_reserved():
     assert C.address_length(0x90) == 3
     assert C.address_length(0xFF) == 3
+
+
+def test_note_and_decision_codes():
+    assert C.NOTE == 0x14 and C.NOTE in C.CONTROL_CODES
+    assert C.DECISION_CODES == frozenset({C.READ, C.SKIP, C.CONT, C.STOP, C.NEXT, C.END, C.REFRESH, C.NOTE})
+    assert C.name(C.STOP) == "STOP" and C.name(0x41) == "0x41"
