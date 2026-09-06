@@ -1,0 +1,28 @@
+model:
+  d_model: 768
+  n_layers: 16
+  swa_every: 4
+  n_heads: 8
+  head_dim: 64
+  window: 512
+  chunk: 64
+  block: 512
+  n_slots: 32
+  mlp_mult: 4
+  conv_kernel: 4
+train:
+  seq_len: 4096
+  batch_size: 8          # par GPU
+  grad_accum: 8          # batch effectif 2 GPU × 8 × 8 × 4096 ≈ 0,5 M octets (spec §6.1)
+  lr: 3.0e-4
+  warmup_steps: 2000
+  max_steps: 4000        # ≈ 2 Go d'octets ; ajuster selon le débit mesuré
+  weight_decay: 0.1
+  grad_clip: 1.0
+  amp: true
+  ckpt_every_minutes: 30
+  log_every: 20
+  hub_repo: null         # ex. "utilisateur/relis-v1-pretrain" ; token dans HF_TOKEN
+data:
+  train_bin: /kaggle/input/relis-shards/train.bin
+  val_bin: /kaggle/input/relis-shards/val.bin

@@ -1,0 +1,27 @@
+model:
+  d_model: 64
+  n_layers: 4
+  swa_every: 4
+  n_heads: 2
+  head_dim: 16
+  window: 16
+  chunk: 8
+  block: 32
+  n_slots: 4
+  mlp_mult: 2
+  conv_kernel: 4
+train:
+  seq_len: 128
+  batch_size: 4
+  grad_accum: 1
+  lr: 1.0e-3
+  warmup_steps: 10
+  max_steps: 60
+  weight_decay: 0.1
+  grad_clip: 1.0
+  amp: false
+  ckpt_every_minutes: 30
+  log_every: 10
+data:
+  train_bin: shards/tiny/train.bin
+  val_bin: shards/tiny/val.bin
