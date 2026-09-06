@@ -48,5 +48,5 @@ class CausalConv1d(nn.Module):
             conv_state = xt.new_zeros(B, C, self.kernel - 1)
         xcat = torch.cat([conv_state.to(xt.dtype), xt], dim=2)  # (B, C, k-1+L)
         y = self.conv(xcat)  # (B, C, L)
-        new_state = xcat[:, :, -(self.kernel - 1):]
+        new_state = xcat[:, :, -(self.kernel - 1):].float()   # l'état reste fp32 (spec §6.4)
         return y.transpose(1, 2), new_state

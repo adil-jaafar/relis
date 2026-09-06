@@ -32,6 +32,10 @@ def main(argv=None):
     ap.add_argument("--run_dir", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no_resume", action="store_true")
+    ap.add_argument("--find_unused_parameters", action="store_true",
+                    help="DDP : tolère des paramètres sans gradient (coûteux)")
+    ap.add_argument("--static_graph", action="store_true",
+                    help="DDP : graphe constant d'un pas à l'autre (recommandé pour le pré-entraînement)")
     ap.add_argument("--override", action="extend", nargs="+", default=None,
                     help="ex. --override train.max_steps=10 train.batch_size=4")
     args = ap.parse_args(argv)
@@ -54,7 +58,10 @@ def main(argv=None):
     if int(os.environ.get("RANK", "0")) == 0:
         print(f"paramètres : {sum(p.numel() for p in model.parameters())/1e6:.1f} M")
     if world > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[torch.cuda.current_device()])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[torch.cuda.current_device()],
+            find_unused_parameters=args.find_unused_parameters,
+            static_graph=args.static_graph)
 
     train_ds = ByteWindows(data["train_bin"], tcfg.seq_len)
     val_ds = ByteWindows(data["val_bin"], tcfg.seq_len)

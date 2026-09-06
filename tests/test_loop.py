@@ -117,3 +117,16 @@ def test_hub_push_respects_cadence(tmp_path, monkeypatch):
     assert (tmp_path / "run" / "last.pt").exists()   # sauvegardes locales à chaque pas
     assert pushes == ["x/y"]                          # un seul push : celui de fin de run
     assert out["stopped_by_budget"] is False
+
+
+def test_train_rejects_seq_len_below_block(tmp_path):
+    import pytest
+    p = str(tmp_path / "train.bin")
+    w = ShardWriter(p)
+    w.add(b"le chat dort. le chien court. " * 400, "src=t")
+    w.close()
+    ds = ByteWindows(p, seq_len=8)          # 8 < block (32) : le Buffer n'écrirait jamais
+    m = RelisModel(RelisConfig.tiny())
+    with pytest.raises(AssertionError):
+        train(m, _tcfg(seq_len=8, max_steps=1), ds, ds, str(tmp_path / "run"),
+              device="cpu", resume=False)

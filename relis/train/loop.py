@@ -83,6 +83,9 @@ def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
 
 def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
           resume=True, on_step=None) -> dict:
+    assert tcfg.seq_len >= _unwrap(model).cfg.block, (
+        "seq_len doit être ≥ block : sinon le module d'écriture du Buffer ne reçoit "
+        "aucun gradient et DDP échoue")
     is_main = int(os.environ.get("RANK", "0")) == 0
     t_start = time.time()
     model.to(device).train()

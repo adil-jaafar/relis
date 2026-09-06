@@ -21,9 +21,11 @@ os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
 %cd relis
 !python -m relis.train.bench --config configs/pretrain_t4.yaml
 !torchrun --nproc_per_node=2 -m relis.train.pretrain \
-    --config configs/pretrain_t4.yaml --run_dir /kaggle/working/runs/v1 \
+    --config configs/pretrain_t4.yaml --run_dir /kaggle/working/runs/v1 --static_graph \
     --override train.hub_repo=<utilisateur>/relis-v1-pretrain
 ```
+
+`--static_graph` est recommandé pour le pré-entraînement (graphe DDP constant d'un pas à l'autre, allreduce plus efficace) ; `--find_unused_parameters` ne sert qu'en cas d'erreur DDP sur un paramètre sans gradient.
 
 À chaque nouvelle session (Kaggle coupe à 12 h), relancer la même cellule : `train()` récupère `last.pt` depuis le Hub et reprend au pas sauvegardé.
 

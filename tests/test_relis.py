@@ -141,3 +141,24 @@ def test_grad_checkpoint_matches_plain():
     lg, st_ckpt = m_ckpt.step(x[:, 0], int(Mode.SCAN), st_ckpt)
     assert lg.shape == (2, 256)
 
+
+def test_model_end_to_end_under_autocast():
+    cfg, m = _model()
+    m.train()
+    x = torch.randint(0, 256, (2, 2 * cfg.block + 5))
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        logits, st = m(x, int(Mode.SCAN), m.new_state(2, "cpu"))
+        logits.float().sum().backward()
+    assert st.slots.dtype == torch.float32
+    assert st.pending.dtype == torch.float32
+    for g in st.gdn:
+        if g is not None:
+            assert g[0].dtype == torch.float32
+            assert g[1].dtype == torch.float32
+    assert m.slots.grad is not None
+
+    with torch.autocast("cpu", dtype=torch.bfloat16), torch.no_grad():
+        st2 = m.new_state(2, "cpu")
+        for t in range(cfg.block + 1):
+            _, st2 = m.step(x[:, t], int(Mode.SCAN), st2)
+    assert st2.slots.dtype == torch.float32
