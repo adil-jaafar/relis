@@ -36,7 +36,12 @@ def load_checkpoint(dir, model, optimizer=None, scaler=None):
     if rng.get("torch") is not None:
         torch.set_rng_state(rng["torch"])
     if rng.get("cuda") is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(rng["cuda"])
+        saved_cuda_count = len(rng["cuda"])
+        current_device_count = torch.cuda.device_count()
+        if saved_cuda_count == current_device_count:
+            torch.cuda.set_rng_state_all(rng["cuda"])
+        else:
+            print(f"[checkpoint] état RNG CUDA ignoré ({saved_cuda_count} états sauvegardés, {current_device_count} GPU visibles)")
     return {"step": payload["step"], "cfg": payload["cfg"], "extra": payload.get("extra", {})}
 
 
