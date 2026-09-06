@@ -26,6 +26,8 @@ class TrainConfig:
     ckpt_every_minutes: float = 30.0
     log_every: int = 20
     hub_repo: str | None = None
+    hub_every_minutes: float = 120.0        # le Hub coûte cher : bien plus rare que le local
+    time_budget_hours: float | None = None  # arrêt propre avant la coupure Kaggle (12 h)
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -82,6 +84,7 @@ def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
 def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
           resume=True, on_step=None) -> dict:
     is_main = int(os.environ.get("RANK", "0")) == 0
+    t_start = time.time()
     model.to(device).train()
     opt = _make_optimizer(model, tcfg)
     scaler = torch.amp.GradScaler("cuda", enabled=tcfg.amp and device.startswith("cuda"))
@@ -96,20 +99,33 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
             step = info["step"]
     g = torch.Generator().manual_seed(1000 + step + int(os.environ.get("RANK", "0")))
     last_ckpt = time.time()
+    last_hub = time.time()
     last_loss = float("nan")
+    stopped_by_budget = False
     cfg_dict = _unwrap(model).cfg.to_dict()
 
-    def _save():
+    def _save(final: bool = False):
+        """Sauvegarde locale ; push Hub seulement à la cadence hub_every_minutes ou en fin de run."""
+        nonlocal last_hub
         if not is_main:
             return
         save_checkpoint(run_dir, _unwrap(model), opt, scaler, step, cfg_dict, {"train": asdict(tcfg)})
-        if tcfg.hub_repo:
-            try:
-                push_to_hub(run_dir, tcfg.hub_repo)
-            except Exception as e:  # le Hub ne doit jamais tuer l'entraînement
-                print(f"[hub] push échoué : {e}")
+        if not tcfg.hub_repo:
+            return
+        if not (final or time.time() - last_hub > tcfg.hub_every_minutes * 60):
+            return
+        try:
+            push_to_hub(run_dir, tcfg.hub_repo)
+        except Exception as e:  # le Hub ne doit jamais tuer l'entraînement
+            print(f"[hub] push échoué : {e}")
+        last_hub = time.time()
 
     while step < tcfg.max_steps:
+        if tcfg.time_budget_hours is not None and time.time() - t_start > tcfg.time_budget_hours * 3600:
+            stopped_by_budget = True
+            if is_main:
+                print(f"[budget] arrêt propre après {step} pas")
+            break
         for grp in opt.param_groups:
             grp["lr"] = lr_at(step, tcfg)
         opt.zero_grad(set_to_none=True)
@@ -131,9 +147,10 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
             print(f"step {step} loss {acc:.4f} bpb {acc/math.log(2):.3f} lr {lr_at(step, tcfg):.2e}")
         if time.time() - last_ckpt > tcfg.ckpt_every_minutes * 60:
             _save(); last_ckpt = time.time()
-    _save()
+    _save(final=True)
     val_bpb = bits_per_byte(_unwrap(model), val_ds, tcfg.seq_len, n_batches=4,
                             batch_size=max(1, tcfg.batch_size // 2), device=device) if is_main else float("nan")
     if is_main:
         print(f"val bpb {val_bpb:.3f}")
-    return {"step": step, "last_loss": last_loss, "val_bpb": val_bpb}
+    return {"step": step, "last_loss": last_loss, "val_bpb": val_bpb,
+            "stopped_by_budget": stopped_by_budget}

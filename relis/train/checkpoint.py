@@ -50,6 +50,11 @@ def push_to_hub(dir, repo_id):
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     api.create_repo(repo_id, private=True, exist_ok=True)
     api.upload_file(path_or_fileobj=os.path.join(dir, "last.pt"), path_in_repo="last.pt", repo_id=repo_id)
+    # last.pt pèse ~2 Go : sans squash, l'historique LFS épuise le quota en un jour.
+    try:
+        api.super_squash_history(repo_id=repo_id)
+    except Exception as e:
+        print(f"[hub] squash d'historique échoué : {e}")
 
 
 def pull_from_hub(dir, repo_id):

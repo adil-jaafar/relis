@@ -24,6 +24,8 @@ train:
   ckpt_every_minutes: 30
   log_every: 20
   hub_repo: null         # ex. "utilisateur/relis-v1-pretrain" ; token dans HF_TOKEN
+  hub_every_minutes: 120 # le local reste à 30 min ; le Hub coûte du quota LFS
+  time_budget_hours: 11.5 # Kaggle coupe à 12 h : sortir proprement avant
 data:
   train_bin: /kaggle/input/relis-shards/train.bin
   val_bin: /kaggle/input/relis-shards/val.bin

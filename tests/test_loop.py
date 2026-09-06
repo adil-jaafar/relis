@@ -73,3 +73,47 @@ def test_resume_calls_barrier_when_distributed(tmp_path, monkeypatch):
     run = str(tmp_path / "run")
     train(m, _tcfg(max_steps=2), tr, va, run, device="cpu", resume=True)
     assert len(calls) == 1
+
+
+class _Clock:
+    """Horloge factice : chaque appel à time() avance de `step` secondes."""
+
+    def __init__(self, step: float):
+        self.step = step
+        self.now = 0.0
+
+    def time(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def test_time_budget_stops_early(tmp_path, monkeypatch):
+    from relis.train import loop as loop_mod
+
+    monkeypatch.setattr(loop_mod, "time", _Clock(60.0))   # 1 min par appel
+    tr, va = _tiny_data(tmp_path)
+    m = RelisModel(RelisConfig.tiny())
+    run = str(tmp_path / "run")
+    out = train(m, _tcfg(max_steps=100, time_budget_hours=0.5), tr, va, run,
+                device="cpu", resume=False)
+    assert 0 < out["step"] < 100
+    assert out["stopped_by_budget"] is True
+    assert (tmp_path / "run" / "last.pt").exists()
+
+
+def test_hub_push_respects_cadence(tmp_path, monkeypatch):
+    from relis.train import loop as loop_mod
+
+    pushes = []
+    monkeypatch.setattr(loop_mod, "push_to_hub", lambda d, r: pushes.append(r))
+    monkeypatch.setattr(loop_mod, "pull_from_hub", lambda d, r: False)
+
+    tr, va = _tiny_data(tmp_path)
+    m = RelisModel(RelisConfig.tiny())
+    run = str(tmp_path / "run")
+    out = train(m, _tcfg(max_steps=5, ckpt_every_minutes=0, hub_every_minutes=1e9,
+                         hub_repo="x/y"), tr, va, run, device="cpu", resume=False)
+    assert out["step"] == 5
+    assert (tmp_path / "run" / "last.pt").exists()   # sauvegardes locales à chaque pas
+    assert pushes == ["x/y"]                          # un seul push : celui de fin de run
+    assert out["stopped_by_budget"] is False
