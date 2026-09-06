@@ -102,3 +102,13 @@ def test_parameter_count_v1_in_range():
     m = RelisModel(RelisConfig())
     n = sum(p.numel() for p in m.parameters())
     assert 100e6 < n < 170e6, n
+
+
+def test_slots_parameter_receives_gradient():
+    cfg, m = _model()
+    x = torch.randint(0, 256, (1, 2 * cfg.block + 3))
+    logits, st = m(x, int(Mode.SCAN), m.new_state(1, "cpu"))
+    logits.float().sum().backward()
+    assert m.slots.grad is not None
+    assert m.slots.grad.abs().sum() > 0
+    assert m.writer.gate.weight.grad is not None

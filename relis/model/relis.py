@@ -4,6 +4,10 @@ forward() traite la séquence par blocs de cfg.block positions ; dans un bloc,
 toutes les positions lisent les slots tels qu'ils étaient au début du bloc ;
 à la frontière, SlotWrite met à jour les slots chunk par chunk. step() suit
 exactement le même calendrier, d'où l'équivalence numérique des deux modes.
+
+Le `State` passé à `forward`/`step` est modifié en place puis renvoyé ;
+l'appelant ne doit pas garder de référence "avant l'appel" en supposant
+qu'elle restera inchangée.
 """
 import torch
 import torch.nn as nn

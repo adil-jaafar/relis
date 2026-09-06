@@ -20,9 +20,9 @@ class State:
                 gdn.append(None); swa.append(blk.mixer.init_cache(B, device))
             else:
                 gdn.append(blk.mixer.init_state(B, device)); swa.append(None)
-        slots = model.slots.detach().unsqueeze(0).expand(B, -1, -1).contiguous().to(device)
+        slots = model.slots.unsqueeze(0).expand(B, -1, -1).contiguous().to(device)
         pending = torch.zeros(B, 0, model.cfg.d_model, device=device)
-        return cls(gdn=gdn, swa=swa, slots=slots, pending=pending, seen=0, _init_slots=slots.clone())
+        return cls(gdn=gdn, swa=swa, slots=slots, pending=pending, seen=0, _init_slots=slots.detach().clone())
 
     def reset_memory(self) -> None:
         """REFRESH (spec §4.8) : Mémoire remise à zéro, Buffer conservé."""
