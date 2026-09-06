@@ -58,3 +58,18 @@ def test_bits_per_byte_range(tmp_path):
     m = RelisModel(RelisConfig.tiny())
     bpb = bits_per_byte(m, tr, seq_len=32, n_batches=2, batch_size=2, device="cpu")
     assert 6.0 < bpb < 10.0     # ~8 bits/octet pour un modèle non entraîné
+
+
+def test_resume_calls_barrier_when_distributed(tmp_path, monkeypatch):
+    import torch.distributed as dist
+
+    calls = []
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "barrier", lambda *a, **kw: calls.append(1))
+
+    tr, va = _tiny_data(tmp_path)
+    m = RelisModel(RelisConfig.tiny())
+    run = str(tmp_path / "run")
+    train(m, _tcfg(max_steps=2), tr, va, run, device="cpu", resume=True)
+    assert len(calls) == 1

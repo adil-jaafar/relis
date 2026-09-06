@@ -89,6 +89,8 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
     if resume:
         if tcfg.hub_repo and is_main and not os.path.exists(os.path.join(run_dir, "last.pt")):
             pull_from_hub(run_dir, tcfg.hub_repo)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
         info = load_checkpoint(run_dir, _unwrap(model), opt, scaler)
         if info is not None:
             step = info["step"]
