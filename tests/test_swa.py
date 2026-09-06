@@ -1,6 +1,6 @@
 import torch
 from relis.model.config import RelisConfig
-from relis.model.swa import SlidingWindowAttention
+from relis.model.swa import SlidingWindowAttention, windowed_attention
 
 
 def _naive(m, x):
@@ -60,3 +60,46 @@ def test_cache_is_bounded():
     m = SlidingWindowAttention(cfg)
     _, c = m(torch.randn(1, 500, cfg.d_model), None)
     assert c["k"].shape[2] == cfg.window - 1 and c["v"].shape[2] == cfg.window - 1
+
+
+def test_attention_core_fp32_under_autocast():
+    """Vérifie que le cœur d'attention reste fp32 même sous autocast bf16."""
+    cfg = RelisConfig.tiny()
+    device = torch.device("cpu")
+
+    # Inputs fp32
+    B, L, Lc, H, dh = 1, 20, 5, cfg.n_heads, cfg.head_dim
+    q = torch.randn(B, H, L, dh, dtype=torch.float32, device=device)
+    k_all = torch.randn(B, H, Lc + L, dh, dtype=torch.float32, device=device)
+    v_all = torch.randn(B, H, Lc + L, dh, dtype=torch.float32, device=device)
+    slopes = torch.tensor([2.0 ** (-8.0 * (h + 1) / H) for h in range(H)], dtype=torch.float32, device=device)
+    qi = torch.arange(Lc, Lc + L, device=device)[:, None]
+    kj = torch.arange(0, Lc + L, device=device)[None, :]
+
+    # Test core function inside and outside autocast
+    o_plain = windowed_attention(q, k_all, v_all, qi, kj, slopes, cfg.window, dh)
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        o_ac = windowed_attention(q, k_all, v_all, qi, kj, slopes, cfg.window, dh)
+
+    # Core should always return fp32
+    assert o_plain.dtype == torch.float32, f"Expected float32, got {o_plain.dtype}"
+    assert o_ac.dtype == torch.float32, f"Expected float32 under autocast, got {o_ac.dtype}"
+    assert torch.allclose(o_ac, o_plain, atol=1e-5), "Core attention results differ under autocast"
+
+    # Test module forward under autocast
+    m = SlidingWindowAttention(cfg)
+    x = torch.randn(1, 20, cfg.d_model, dtype=torch.float32, device=device)
+
+    y_plain, c_plain = m(x, None)
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        y_ac, c_ac = m(x, None)
+
+    # Cache k,v should be fp32
+    assert c_plain["k"].dtype == torch.float32, f"Expected cache k float32, got {c_plain['k'].dtype}"
+    assert c_ac["k"].dtype == torch.float32, f"Expected cache k float32 under autocast, got {c_ac['k'].dtype}"
+
+    # Output can be in any dtype from projections, but should be close
+    # Allow larger tolerance since o_proj may run in bf16
+    assert torch.allclose(y_ac.float(), y_plain.float(), atol=5e-2), "Module output differs under autocast"

@@ -8,6 +8,31 @@ import torch.nn as nn
 from .config import RelisConfig
 
 
+def windowed_attention(q, k_all, v_all, qi, kj, slopes, window, dh):
+    """Cœur d'attention local : calcul en fp32 garanti sous autocast.
+
+    Args:
+        q: (B, H, L, dh) - queries, float32
+        k_all: (B, H, Lc+L, dh) - concatenated cached + current keys, float32
+        v_all: (B, H, Lc+L, dh) - concatenated cached + current values, float32
+        qi: (L, 1) - positions absolues des requêtes
+        kj: (1, Lc+L) - positions absolues des clés
+        slopes: (H,) - ALiBi slopes par tête
+        window: int - taille de fenêtre
+        dh: int - dimension par tête
+
+    Returns:
+        o: (B, H, L, dh) - attention output, float32
+    """
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        allowed = (kj <= qi) & (kj > qi - window)
+        scores = (q @ k_all.transpose(-1, -2)) / dh ** 0.5           # (B,H,L,Lc+L)
+        scores = scores - slopes[None, :, None, None] * (qi - kj).float()
+        scores = scores.masked_fill(~allowed, float("-inf"))
+        o = torch.softmax(scores, dim=-1) @ v_all                    # fp32
+    return o
+
+
 class SlidingWindowAttention(nn.Module):
     def __init__(self, cfg: RelisConfig):
         super().__init__()
@@ -38,11 +63,7 @@ class SlidingWindowAttention(nn.Module):
         # positions absolues des requêtes et des clés
         qi = torch.arange(pos0, pos0 + L, device=x.device)[:, None]
         kj = torch.arange(pos0 - Lc, pos0 + L, device=x.device)[None, :]
-        allowed = (kj <= qi) & (kj > qi - W)
-        scores = (q @ k_all.transpose(-1, -2)) / dh ** 0.5           # (B,H,L,Lc+L)
-        scores = scores - self.slopes[None, :, None, None] * (qi - kj).float()
-        scores = scores.masked_fill(~allowed, float("-inf"))
-        o = torch.softmax(scores, dim=-1) @ v_all                    # fp32
+        o = windowed_attention(q, k_all, v_all, qi, kj, self.slopes, W, dh)
         y = self.o_proj(o.transpose(1, 2).reshape(B, L, H * dh).to(x.dtype))
         keep = W - 1
         new_cache = {"k": k_all[:, :, -keep:] if keep > 0 else k_all[:, :, :0],
