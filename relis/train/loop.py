@@ -28,6 +28,8 @@ class TrainConfig:
     hub_repo: str | None = None
     hub_every_minutes: float = 120.0        # le Hub coûte cher : bien plus rare que le local
     time_budget_hours: float | None = None  # arrêt propre avant la coupure Kaggle (12 h)
+    warmup_frac: float | None = None        # si défini, warmup = warmup_frac × max_steps (prime sur warmup_steps)
+    compile: bool = False                   # torch.compile sur le cœur GDN (opt-in, mesurer avec bench --compile)
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -36,11 +38,40 @@ class TrainConfig:
         return cls(**raw.get("train", {}))
 
 
+def effective_warmup(cfg: TrainConfig) -> int:
+    """Nombre de pas de warmup : fraction du run si warmup_frac est défini, sinon warmup_steps."""
+    if cfg.warmup_frac is not None:
+        return max(1, int(round(cfg.warmup_frac * cfg.max_steps)))
+    return cfg.warmup_steps
+
+
 def lr_at(step: int, cfg: TrainConfig) -> float:
-    if step < cfg.warmup_steps:
-        return cfg.lr * step / max(1, cfg.warmup_steps)
-    progress = min(1.0, (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps))
+    warmup = effective_warmup(cfg)
+    if step < warmup:
+        return cfg.lr * step / max(1, warmup)
+    progress = min(1.0, (step - warmup) / max(1, cfg.max_steps - warmup))
     return cfg.lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def enable_compile() -> bool:
+    """Remplace relis.model.gdn.gdn_chunked par sa version torch.compile.
+
+    Le cœur GDN est une fonction pure de tenseurs : c'est la seule cible sûre et
+    utile (la boucle par blocs et l'État mutable ne se compilent pas bien). Les
+    formes varient peu (pièces de `block` positions, plus une queue), donc peu de
+    recompilations. Renvoie False, sans rien changer, si la compilation est
+    indisponible (pas de compilateur C++, GPU non supporté, etc.).
+    """
+    import relis.model.gdn as gdn_mod
+    original = gdn_mod.gdn_chunked
+    try:
+        compiled = torch.compile(original, dynamic=None)
+    except Exception as e:  # environnement sans compilateur : on continue en eager
+        print(f"[compile] indisponible, exécution eager : {e}")
+        return False
+    gdn_mod.gdn_chunked = compiled
+    print("[compile] gdn_chunked compilé (la première itération sera lente)")
+    return True
 
 
 def _unwrap(model):
@@ -88,6 +119,8 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         "aucun gradient et DDP échoue")
     is_main = int(os.environ.get("RANK", "0")) == 0
     t_start = time.time()
+    if tcfg.compile:
+        enable_compile()
     model.to(device).train()
     opt = _make_optimizer(model, tcfg)
     device_type = "cuda" if device.startswith("cuda") else "cpu"

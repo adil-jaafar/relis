@@ -130,3 +130,44 @@ def test_train_rejects_seq_len_below_block(tmp_path):
     with pytest.raises(AssertionError):
         train(m, _tcfg(seq_len=8, max_steps=1), ds, ds, str(tmp_path / "run"),
               device="cpu", resume=False)
+
+
+def test_warmup_frac_overrides_warmup_steps():
+    from relis.train.loop import effective_warmup
+    c = _tcfg(lr=1.0, warmup_steps=2000, max_steps=100, warmup_frac=0.1)
+    assert effective_warmup(c) == 10
+    assert abs(lr_at(10, c) - 1.0) < 1e-9
+    assert abs(lr_at(5, c) - 0.5) < 1e-9
+    c2 = _tcfg(lr=1.0, warmup_steps=20, max_steps=100)
+    assert effective_warmup(c2) == 20
+
+
+def test_enable_compile_wraps_gdn_core(monkeypatch):
+    import relis.model.gdn as gdn_mod
+    from relis.train.loop import enable_compile
+    original = gdn_mod.gdn_chunked
+    monkeypatch.setattr(gdn_mod, "gdn_chunked", original)   # restauré après le test
+    seen = []
+
+    def fake_compile(fn, **kw):
+        seen.append(fn)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    assert enable_compile() is True
+    assert seen == [original]
+    assert gdn_mod.gdn_chunked is original
+
+
+def test_enable_compile_survives_failure(monkeypatch):
+    import relis.model.gdn as gdn_mod
+    from relis.train.loop import enable_compile
+    original = gdn_mod.gdn_chunked
+    monkeypatch.setattr(gdn_mod, "gdn_chunked", original)
+
+    def boom(fn, **kw):
+        raise RuntimeError("pas de compilateur")
+
+    monkeypatch.setattr(torch, "compile", boom)
+    assert enable_compile() is False
+    assert gdn_mod.gdn_chunked is original

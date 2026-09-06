@@ -61,12 +61,21 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--target_gb", type=float, default=2.0)
+    ap.add_argument("--compile", action="store_true",
+                    help="mesurer avec torch.compile sur le cœur GDN (même effet que train.compile=true)")
     args = ap.parse_args()
-    raw = yaml.safe_load(open(args.config, encoding="utf-8"))
+    with open(args.config, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
     mcfg = RelisConfig(**raw["model"]); t = raw["train"]
+    if args.compile:
+        from relis.train.loop import enable_compile
+        enable_compile()
     model = RelisModel(mcfg)
     asked_bs, asked_accum = t["batch_size"], t["grad_accum"]
     bps, bs = _measure_with_fallback(model, t["seq_len"], asked_bs, args.device, t["amp"])
+    if args.compile:
+        print("[bench] mesure avec torch.compile ; la chauffe inclut la compilation, "
+              "le débit affiché est donc prudent")
     accum = max(1, asked_bs * asked_accum // bs)          # batch effectif conservé
     per_step = bs * accum * t["seq_len"]
     steps_needed = args.target_gb * 1e9 / per_step
