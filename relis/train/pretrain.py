@@ -32,11 +32,12 @@ def main(argv=None):
     ap.add_argument("--run_dir", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no_resume", action="store_true")
-    ap.add_argument("--override", action="append", default=[], help="ex. train.max_steps=10")
+    ap.add_argument("--override", action="extend", nargs="+", default=None,
+                    help="ex. --override train.max_steps=10 train.batch_size=4")
     args = ap.parse_args(argv)
 
     with open(args.config, "r", encoding="utf-8") as f:
-        raw = _apply_overrides(yaml.safe_load(f), args.override)
+        raw = _apply_overrides(yaml.safe_load(f), args.override or [])
     mcfg = RelisConfig(**raw["model"])
     tcfg = TrainConfig(**raw["train"])
     data = raw["data"]

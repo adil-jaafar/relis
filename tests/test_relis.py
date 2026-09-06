@@ -112,3 +112,32 @@ def test_slots_parameter_receives_gradient():
     assert m.slots.grad is not None
     assert m.slots.grad.abs().sum() > 0
     assert m.writer.gate.weight.grad is not None
+
+
+def test_grad_checkpoint_matches_plain():
+    cfg_plain = RelisConfig.tiny()
+    cfg_ckpt = RelisConfig.tiny(); cfg_ckpt.grad_checkpoint = True
+    m_plain = RelisModel(cfg_plain)
+    m_ckpt = RelisModel(cfg_ckpt)
+    m_ckpt.load_state_dict(m_plain.state_dict())
+    m_plain.train(); m_ckpt.train()
+
+    L = 2 * cfg_plain.block + 7
+    x = torch.randint(0, 256, (2, L))
+    l_plain, _ = m_plain(x, int(Mode.SCAN), m_plain.new_state(2, "cpu"))
+    l_ckpt, st_ckpt = m_ckpt(x, int(Mode.SCAN), m_ckpt.new_state(2, "cpu"))
+    assert torch.allclose(l_plain, l_ckpt, atol=1e-5), (l_plain - l_ckpt).abs().max()
+
+    l_plain.float().sum().backward()
+    l_ckpt.float().sum().backward()
+    grads_plain = dict(m_plain.named_parameters())
+    for name, p in m_ckpt.named_parameters():
+        gp = grads_plain[name].grad
+        assert p.grad is not None, name
+        assert gp is not None, name
+        assert torch.allclose(gp, p.grad, atol=1e-5), (name, (gp - p.grad).abs().max())
+
+    # le chemin pas-à-pas ignore le checkpointing (single_step)
+    lg, st_ckpt = m_ckpt.step(x[:, 0], int(Mode.SCAN), st_ckpt)
+    assert lg.shape == (2, 256)
+

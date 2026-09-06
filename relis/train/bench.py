@@ -38,6 +38,24 @@ def throughput(model, seq_len, batch_size, device, amp, steps=5) -> float:
     return steps * batch_size * seq_len / (time.time() - t0)
 
 
+def _measure_with_fallback(model, seq_len, batch_size, device, amp):
+    """Mesure le débit en divisant le batch par deux à chaque OOM (jusqu'à 1)."""
+    bs = batch_size
+    while True:
+        try:
+            print(f"[bench] essai batch_size={bs}")
+            return throughput(model, seq_len, bs, device, amp), bs
+        except torch.cuda.OutOfMemoryError:
+            print(f"[bench] OOM à batch_size={bs}")
+            model.zero_grad(set_to_none=True)
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+            if bs <= 1:
+                raise
+            bs = max(1, bs // 2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -47,14 +65,19 @@ def main():
     raw = yaml.safe_load(open(args.config, encoding="utf-8"))
     mcfg = RelisConfig(**raw["model"]); t = raw["train"]
     model = RelisModel(mcfg)
-    bps = throughput(model, t["seq_len"], t["batch_size"], args.device, t["amp"])
-    per_step = t["batch_size"] * t["grad_accum"] * t["seq_len"]
+    asked_bs, asked_accum = t["batch_size"], t["grad_accum"]
+    bps, bs = _measure_with_fallback(model, t["seq_len"], asked_bs, args.device, t["amp"])
+    accum = max(1, asked_bs * asked_accum // bs)          # batch effectif conservé
+    per_step = bs * accum * t["seq_len"]
     steps_needed = args.target_gb * 1e9 / per_step
-    print(f"débit : {bps:,.0f} octets/s par GPU")
+    print(f"débit : {bps:,.0f} octets/s par GPU (batch_size={bs})")
     print(f"octets par pas (1 GPU) : {per_step:,} ; pas pour {args.target_gb} Go : {steps_needed:,.0f}")
     print(f"heures pour {args.target_gb} Go sur 1 GPU : {args.target_gb*1e9/bps/3600:.1f}")
     if args.device.startswith("cuda"):
         print(f"mémoire GPU max : {torch.cuda.max_memory_allocated()/1e9:.2f} Go")
+    if bs != asked_bs:
+        print(f"[bench] batch réduit {asked_bs} -> {bs} ; recopier cette option au lancement :")
+        print(f"    --override train.batch_size={bs} train.grad_accum={accum}")
 
 
 if __name__ == "__main__":

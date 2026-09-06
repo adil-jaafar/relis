@@ -8,9 +8,18 @@ exactement le même calendrier, d'où l'équivalence numérique des deux modes.
 Le `State` passé à `forward`/`step` est modifié en place puis renvoyé ;
 l'appelant ne doit pas garder de référence "avant l'appel" en supposant
 qu'elle restera inchangée.
+
+Sous autocast, le flux résiduel reste en fp32 par construction : la sortie de
+`nn.Embedding` est en fp32 et les sous-couches promeuvent leur sortie vers ce
+dtype ; seules les matmuls internes (Linear) passent en demi-précision.
+
+Si `cfg.grad_checkpoint` est vrai, chaque bloc est réexécuté à la rétropropagation
+(`torch.utils.checkpoint`) : ~25-35 % de calcul en plus contre une chute massive
+de la mémoire d'activations. Le chemin sans checkpointing est inchangé.
 """
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as ckpt
 
 from .config import RelisConfig
 from .layers import RMSNorm, SwiGLU
@@ -63,11 +72,46 @@ class RelisModel(nn.Module):
     def new_state(self, B: int, device) -> State:
         return State.init(self, B, device)
 
+    @staticmethod
+    def _ckpt_block(blk: Block, h, st_gdn, st_swa, slots):
+        """Exécute un bloc sous `torch.utils.checkpoint`.
+
+        `checkpoint` n'accepte/ne rend que des tenseurs : on aplatit l'état
+        (tuple pour la GDN, dict pour la SWA) à l'entrée et on le reconstruit
+        à la sortie, les entiers (`pos`) passant par la fermeture.
+        """
+        if blk.is_swa:
+            if st_swa is None:
+                st_swa = blk.mixer.init_cache(h.shape[0], h.device)
+            pos = st_swa["pos"]
+
+            def fn(h_, k_, v_, slots_):
+                y_, _, c_ = blk(h_, None, {"k": k_, "v": v_, "pos": pos}, slots_)
+                return y_, c_["k"], c_["v"]
+
+            y, ck, cv = ckpt.checkpoint(fn, h, st_swa["k"], st_swa["v"], slots, use_reentrant=False)
+            return y, None, {"k": ck, "v": cv, "pos": pos + h.shape[1]}
+
+        if st_gdn is None:
+            st_gdn = blk.mixer.init_state(h.shape[0], h.device)
+
+        def fn(h_, S_, cs_, slots_):
+            y_, (S2, cs2), _ = blk(h_, (S_, cs_), None, slots_)
+            return y_, S2, cs2
+
+        y, S, cs = ckpt.checkpoint(fn, h, st_gdn[0], st_gdn[1], slots, use_reentrant=False)
+        return y, (S, cs), None
+
     def _run_piece(self, x_ids, mode_ids, state: State, single_step: bool):
         """Passe un morceau (≤ block positions, sans frontière interne) dans la pile."""
         h = self.embed(x_ids) + self.mode_embed(mode_ids)
+        use_ckpt = (self.cfg.grad_checkpoint and self.training
+                    and torch.is_grad_enabled() and not single_step)
         for i, blk in enumerate(self.blocks):
-            h, g, s = blk(h, state.gdn[i], state.swa[i], state.slots, single_step=single_step)
+            if use_ckpt:
+                h, g, s = self._ckpt_block(blk, h, state.gdn[i], state.swa[i], state.slots)
+            else:
+                h, g, s = blk(h, state.gdn[i], state.swa[i], state.slots, single_step=single_step)
             state.gdn[i], state.swa[i] = g, s
         top = self.final_norm(h)
         logits = top @ self.head_weight().t().to(top.dtype)

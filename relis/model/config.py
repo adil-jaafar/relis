@@ -17,6 +17,7 @@ class RelisConfig:
     conv_kernel: int = 4
     vocab: int = 256
     n_modes: int = 3
+    grad_checkpoint: bool = False
 
     def __post_init__(self):
         assert self.block % self.chunk == 0, "block doit être un multiple de chunk"

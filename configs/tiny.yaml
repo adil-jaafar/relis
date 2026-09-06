@@ -10,6 +10,7 @@ model:
   n_slots: 4
   mlp_mult: 2
   conv_kernel: 4
+  grad_checkpoint: false
 train:
   seq_len: 128
   batch_size: 4

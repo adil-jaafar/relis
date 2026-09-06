@@ -10,6 +10,7 @@ model:
   n_slots: 32
   mlp_mult: 4
   conv_kernel: 4
+  grad_checkpoint: true   # indispensable sur T4 15 Go : ~30 % de calcul en plus, mémoire d'activations divisée
 train:
   seq_len: 4096
   batch_size: 8          # par GPU
