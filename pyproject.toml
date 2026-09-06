@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relis"
+version = "0.1.0"
+description = "RELIS : un modèle de langage qui lit pour répondre, et relit quand il faut"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.24",
+  "pyyaml>=6",
+  "huggingface_hub>=0.23",
+  "datasets>=2.19",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["relis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
