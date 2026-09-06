@@ -131,7 +131,7 @@ Une couche sur quatre est une **attention à fenêtre glissante** de 512 octets.
 
 Chaque bloc : RMSNorm → mélangeur (GDN ou SWA, précédé d'une convolution causale courte) → résidu → RMSNorm → MLP (SwiGLU) → résidu, plus la lecture du Buffer (§4.6).
 
-**Taille V1** : d = 768, 16 blocs (12 GDN, 4 SWA en positions 4, 8, 12, 16), MLP ×4, GDN à 8 têtes de dimension 64 avec état 64. Environ 120-150 M paramètres. Embedding d'octets 256×768 ; tête de sortie liée à l'embedding.
+**Taille V1** : d = 768, 16 blocs (12 GDN, 4 SWA en positions 4, 8, 12, 16), MLP ×4, GDN à 8 têtes de dimension 64 avec état 64. Environ 150 M paramètres (la lecture du Buffer utilise une dimension interne réduite de moitié pour tenir ce budget). Embedding d'octets 256×768 ; tête de sortie liée à l'embedding.
 
 ### 4.5 La Mémoire
 

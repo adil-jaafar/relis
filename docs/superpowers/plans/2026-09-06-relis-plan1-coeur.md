@@ -1080,7 +1080,7 @@ git commit -m "feat(model): attention à fenêtre glissante ALiBi avec cache bor
 **Interfaces:**
 - Consumes: `RelisConfig`, `RMSNorm` (Task 3).
 - Produces:
-  - `class SlotRead(cfg)` : `forward(x: (B,L,d), slots: (B,K,d)) -> (B,L,d)` ; cross-attention multi-têtes des positions vers les slots, projections propres à la couche ; retourne l'incrément résiduel (à ajouter par l'appelant).
+  - `class SlotRead(cfg)` : `forward(x: (B,L,d), slots: (B,K,d)) -> (B,L,d)` ; cross-attention multi-têtes des positions vers les slots dans une dimension interne réduite `r = cfg.inner // 2` (256 en V1, 16 en tiny ; `q: Linear(d, r)`, `kv: Linear(d, 2r)`, `o: Linear(r, d)`), projections propres à la couche ; retourne l'incrément résiduel (à ajouter par l'appelant). La dimension réduite maintient le total V1 autour de 150 M paramètres (16 lectures à pleine dimension coûteraient 38 M à elles seules).
   - `class SlotWrite(cfg)` : `forward(h_chunk: (B,C,d), slots: (B,K,d)) -> slots_new: (B,K,d)` avec `Δ = Attn(norm(slots) → norm(h_chunk))`, `g = σ(W_g [slots ; Δ])`, `slots + g ⊙ Δ` ; `apply_blocks(h: (B,L,d), slots)` applique `forward` séquentiellement sur chaque chunk de `cfg.chunk` positions de `h` (L doit être un multiple de `cfg.chunk`).
   - `init_slots(cfg) -> nn.Parameter (K,d)` : vecteurs appris ; `expand_slots(param, B) -> (B,K,d)`.
 
@@ -1179,11 +1179,13 @@ class SlotRead(nn.Module):
         super().__init__()
         self.cfg = cfg
         d = cfg.d_model
+        r = cfg.inner // 2            # dimension interne réduite (256 en V1)
+        assert r % cfg.n_heads == 0
         self.norm_x = RMSNorm(d)
         self.norm_s = RMSNorm(d)
-        self.q = nn.Linear(d, d, bias=False)
-        self.kv = nn.Linear(d, 2 * d, bias=False)
-        self.o = nn.Linear(d, d, bias=False)
+        self.q = nn.Linear(d, r, bias=False)
+        self.kv = nn.Linear(d, 2 * r, bias=False)
+        self.o = nn.Linear(r, d, bias=False)
 
     def forward(self, x, slots):
         k, v = self.kv(self.norm_s(slots)).chunk(2, dim=-1)
@@ -1765,15 +1767,14 @@ def _fineweb2_fr():
 
 def _code():
     from datasets import load_dataset
-    ds = load_dataset("codeparrot/github-code-clean", split="train", streaming=True,
-                      languages=["Python", "JavaScript"], licenses=["mit", "apache-2.0", "bsd-3-clause"])
-    for ex in ds:
-        code = ex.get("code") or ""
-        if not 200 <= len(code) <= 100_000:
-            continue
-        lang = ex.get("language", "")
-        path = (ex.get("path") or "").split("/")[-1][:60]
-        yield code.encode("utf-8"), f"src=code;lang={lang};name={path}"
+    for lang in ("python", "javascript"):
+        ds = load_dataset("bigcode/the-stack-smol-xl", data_dir=f"data/{lang}", split="train", streaming=True)
+        for ex in ds:
+            code = ex.get("content") or ""
+            if not 200 <= len(code) <= 100_000:
+                continue
+            path = (ex.get("path") or "").split("/")[-1][:60]
+            yield code.encode("utf-8"), f"src=code;lang={lang};name={path}"
 
 
 SOURCES = {"wiki_fr": _wiki_fr, "fineweb2_fr": _fineweb2_fr, "code": _code}
