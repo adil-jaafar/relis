@@ -43,6 +43,10 @@ Attente honnête : à 150 M paramètres et 2 Go de données, la fluidité sera c
 | Décision après en-tête | READ ou SKIP (ajout V1, conséquence de l'illimité) |
 | Découpage en patchs | Non en V1 : octets purs. Hiérarchie octets→concepts en V2 |
 | Cellules rappelables (octets + embedding) | **Extraits** en V1 : cellules remplies pendant la lecture, rappelées par contenu (presse-papiers). **Lexique** en V2 : cellules apprises à l'entraînement. Un seul code d'action, RECALL |
+| REFRESH à l'entraînement (plan 2) | Entraîné **exactement comme à l'inférence** par un masque de réinitialisation ; REFRESH redéfini : état GDN et fenêtre locale à zéro, le reste continue (§4.8) |
+| Trace de la raison d'un REFRESH | En **octets**, code NOTE : le modèle écrit pourquoi il relit, la note est relue dans la requête de la passe suivante et visible dans la démo (§4.8) |
+| Séquences d'entraînement ruban | Rubans rembourrés à un multiple de 512 puis **empaquetés** en séquences fixes de 16 384 octets ; Mémoire et slots remis à zéro à chaque début de ruban (§6.1) |
+| Professeur | **Étiquetage seulement** (tours pertinents, résumés d'intention) sur des dialogues français publics ; aucune génération de dialogues (§5, §6.2) |
 
 ## 4. Architecture
 
@@ -78,8 +82,9 @@ Le vocabulaire est exactement 256 symboles. Les octets 0x00-0x1F, sauf `\t` (0x0
 | 0x03 | END | action | Fin du tour |
 | 0x05 | REFRESH | action | Réinitialiser la Mémoire, ré-encoder (message + PART + réponse partielle), re-balayer, puis reprendre la génération |
 | 0x13 | RECALL | action | Rappeler une cellule (§4.9) : suivi de son adresse (2 octets en V1), puis le contrôleur développe les octets de la cellule |
+| 0x14 | NOTE | action | Début d'une note en octets expliquant pourquoi le modèle va relire ; la note se termine par REFRESH et est relue dans la requête suivante (§4.8) |
 
-Les **marqueurs** sont insérés par le contrôleur (entrées). Les **actions** sont *prédites* par le modèle aux positions de **décision** puis réinjectées dans le ruban comme octet suivant. Pendant GENERATE, chaque position est une décision parmi 256 octets où seuls les octets de texte, END, REFRESH et RECALL sont autorisés.
+Les **marqueurs** sont insérés par le contrôleur (entrées). Les **actions** sont *prédites* par le modèle aux positions de **décision** puis réinjectées dans le ruban comme octet suivant. Pendant GENERATE, chaque position est une décision parmi 256 octets où seuls les octets de texte, END, REFRESH, RECALL et NOTE sont autorisés ; après NOTE, seuls les octets de texte et REFRESH le sont.
 
 **Adresse de cellule.** Les octets d'adresse sont pris dans 0x20-0xFF (224 valeurs) pour ne jamais entrer en collision avec les codes de contrôle. La plage du premier octet donne la classe et la longueur : 0x20-0x8F (112 valeurs) désigne un **Extrait** et il est suivi d'**un** seul octet, soit 112 × 224 = 25 088 adresses pour 4 096 cellules (12 bits utiles) ; 0x90-0xFF est réservé au **Lexique** de V2 et sera suivi de deux octets (112 × 224² ≈ 5,6 M adresses, assez pour 2^19 entrées). En V1 une adresse fait donc 2 octets. Pendant ces positions, l'automate UTF-8 est suspendu. Ainsi les décisions sont de simples prédictions du prochain octet : le modèle reste un modèle de langage autorégressif, sans tête d'action séparée ni RL en V1.
 
@@ -109,13 +114,13 @@ GEN  La fonction s'appelle RECALL a1 a2 *parse_config_from_env* et prend ... END
 Avec REFRESH :
 
 ```
-GEN  <réponse partielle> REFRESH
-ENC  <dernier message> PART <réponse partielle>
+GEN  <réponse partielle> NOTE il manque la date du contrat REFRESH
+ENC  <dernier message> PART <réponse partielle> NOTE il manque la date du contrat
 SCAN ... (nouveau balayage, Mémoire neuve, Buffer conservé) ... STOP
 GEN  <suite de la réponse> END
 ```
 
-**En-têtes.** Texte UTF-8 court (< 128 octets) de paires `clé=valeur` séparées par `;`. Messages : `role`, `t` (horodatage). Documents : `type=doc`, `name`, `mime`, `bytes`, `t` (date d'ajout). L'en-tête est lu avant la décision READ/SKIP : c'est ce qui permet d'ignorer un document d'après son nom, son type ou sa taille. Les en-têtes de canal (`chan=history`, `chan=docs`) n'ont pas de décision READ/SKIP : ils sont suivis directement du premier SEG.
+**En-têtes.** Texte UTF-8 court (< 128 octets) de paires `clé=valeur` séparées par `;` ; dans les valeurs, `;` et `=` sont remplacés par une espace et les octets de contrôle assainis, de sorte que l'en-tête se parse sans ambiguïté. Messages : `role`, `t` (horodatage). Documents : `type=doc`, `name`, `mime`, `bytes`, `t` (date d'ajout). L'en-tête est lu avant la décision READ/SKIP : c'est ce qui permet d'ignorer un document d'après son nom, son type ou sa taille. Les en-têtes de canal (`chan=history`, `chan=docs`) n'ont pas de décision READ/SKIP : ils sont suivis directement du premier SEG.
 
 **Canaux.** V1 : `history` puis `docs`. Le format admet d'autres canaux plus tard (outils, résultats d'exécution) sans changer le modèle.
 
@@ -144,7 +149,7 @@ K = 32 slots de dimension d = 768, **partagés par toutes les couches**.
 - **Initialisation** : vecteurs appris, à chaque nouveau tour utilisateur.
 - **Lecture** (chaque bloc) : cross-attention des positions de la séquence vers les slots, avec projections propres à chaque couche. K est petit : coût négligeable. C'est par cette lecture que la requête, écrite dans le Buffer pendant ENCODE, **conditionne** tout le balayage.
 - **Écriture** (une fois par chunk de 64 octets) : un module en sommet de pile met à jour les slots par attention slots → états cachés du chunk, avec porte apprise : `B ← B + g ⊙ Δ`, `g = σ(W [B ; Δ])`. La suite des écritures forme une récurrence à granularité chunk ; la rétropropagation la traverse sur toute la séquence d'entraînement. Les écritures sont calculées par chunk de 64 octets mais ne deviennent **visibles aux lectures qu'à chaque frontière de bloc de 512 octets** : cette latence permet de traiter 512 positions par passage dans la pile et rend les modes chunk et pas-à-pas numériquement équivalents.
-- **Persistance** : conservé à travers les REFRESH d'un même tour ; remis à zéro au tour suivant (la persistance inter-tours est un sujet V2).
+- **Persistance** : conservé à travers les REFRESH d'un même tour ; remis à zéro au tour suivant (la persistance inter-tours est un sujet V2). À l'entraînement, la remise à zéro se fait par échantillon au début de chaque ruban, qui tombe sur une frontière de bloc (§6.1).
 
 **Traducteur (sonde).** Un mini-décodeur (2 blocs GDN, d = 384) reçoit les 32 slots comme préfixe et génère en français « ce que j'ai retenu : demande, plan, faits ». Il est entraîné **après** le modèle principal, **modèle figé**, sur des résumés produits par le professeur pour (requête, tours pertinents). Il n'influence pas le modèle ; il le rend observable. Ce qu'il affiche est donc une *lecture* du Buffer, pas une garantie sur son contenu.
 
@@ -156,7 +161,8 @@ Trois points de décision, tous traités comme prédiction du prochain octet sou
 |---|---|---|
 | après HDR | READ, SKIP | Lire ou sauter le contenu du segment |
 | après DEC | CONT, STOP, NEXT | Continuer, arrêter de lire, changer de canal |
-| pendant GEN | octets texte valides, END, REFRESH, RECALL | Générer, terminer, relire, rappeler un Extrait |
+| pendant GEN | octets texte valides, END, REFRESH, RECALL, NOTE | Générer, terminer, relire, rappeler un Extrait, noter pourquoi relire |
+| après NOTE | octets texte valides, REFRESH | Écrire la raison, puis relire |
 
 Cas limites fixés par le contrôleur : au dernier segment de l'historique, CONT est traité comme NEXT ; au dernier segment des documents (ou s'il n'y a aucun document), CONT et NEXT sont traités comme STOP. Le modèle n'a donc jamais à connaître la longueur des canaux.
 
@@ -164,9 +170,11 @@ Le calcul dépensé par tour = octets lus + octets générés. Question simple :
 
 ### 4.8 REFRESH
 
-Quand le modèle émet REFRESH : le contrôleur conserve la réponse partielle et le Buffer, réinitialise la Mémoire, construit une nouvelle requête `ENC <message> PART <réponse partielle>`, relance un balayage complet (avec ses propres décisions), puis reprend GENERATE en continuant la réponse. La réponse partielle rend chaque passe différente de la précédente : le modèle relit en sachant ce qu'il a déjà dit. Le contrôleur plafonne à 8 REFRESH par tour pour éviter les boucles.
+Avant de relire, le modèle **écrit pourquoi** : il émet NOTE puis une courte note en octets (« il manque la date du contrat », « réponse longue, suite »), puis REFRESH. Le contrôleur conserve la réponse partielle, la note et le Buffer, réinitialise la Mémoire, construit une nouvelle requête `ENC <message> PART <réponse partielle> NOTE <note>`, relance un balayage complet (avec ses propres décisions), puis reprend GENERATE en continuant la réponse. La réponse partielle et la note rendent chaque passe différente de la précédente : le modèle relit en sachant ce qu'il a déjà dit et ce qu'il cherche. La raison survit ainsi à la remise à zéro de la Mémoire par le ruban lui-même (et le Buffer, qui persiste, la porte aussi en latent) ; elle est affichée dans la démo. Le contrôleur plafonne à 8 REFRESH par tour pour éviter les boucles.
 
-En V1, REFRESH est **supervisé par une heuristique de longueur** (§6.2) : le mécanisme est appris et démontrable ; le décider d'après la saturation réelle de l'état est un sujet de thèse (§13).
+**Définition précise de la réinitialisation.** REFRESH remet à zéro l'**état récurrent des couches GDN** et vide la **fenêtre de l'attention locale** ; il ne touche ni à la convolution causale courte (filtre local de 4 octets), ni à la cadence d'écriture du Buffer (les frontières de 512 octets restent comptées depuis le début du ruban), ni aux slots. Cette définition est ce qui rend REFRESH **entraînable exactement comme il sert à l'inférence** : dans un ruban d'entraînement, la réinitialisation est un masque par position, réalisé en forçant la porte d'oubli du GDN à zéro (`log α = −10⁴`) et par un masque « même segment » dans l'attention locale, sans changer l'algorithme chunké ; l'équivalence « forward avec masque » = « forward, reset, forward » est testée.
+
+En V1, la **position** des REFRESH est supervisée par une heuristique de longueur et par les épisodes synthétiques (§6.2), et la **note** par l'oracle : le mécanisme est appris et démontrable ; décider REFRESH d'après la saturation réelle de l'état est un sujet de thèse (§13).
 
 ### 4.9 Les Extraits (presse-papiers de lecture)
 
@@ -191,20 +199,20 @@ Budget total ~2 Go d'octets vus pendant l'entraînement (pré-entraînement + ru
 | Wikipedia FR | pré-entraînement | ~600 Mo |
 | FineWeb-2 (fr), sous-ensemble filtré qualité | pré-entraînement | ~400 Mo |
 | The Stack (Python, JavaScript), filtré | pré-entraînement | ~300 Mo |
-| Jeux d'instructions FR existants (Aya, OpenHermes-FR, Alpaca-FR) | ruban | ~150 Mo |
-| Dialogues multi-tours générés par le professeur sur Colab | ruban | ~150 Mo |
+| Dialogues français publics : OpenAssistant oasst2 (fr, multi-tours), Aya (fr), French-Alpaca | ruban | ~150 Mo |
 | Épisodes synthétiques de lecture (§6.2) | ruban | ~300 Mo (générés à la volée) |
-| Résumés d'intention produits par le professeur | sonde | ~20 Mo |
+| Rappel du corpus de pré-entraînement, en rubans-documents (20 % des séquences ruban) | ruban | pris dans les shards existants |
+| Étiquettes du professeur : tours pertinents par question, résumé d'intention en une phrase | oracle, sonde | ~20 Mo |
 | Jeux de test tenus à part (FR, code, épisodes) | évaluation | ~20 Mo |
 
-Le professeur tourne sur Colab pendant que Kaggle entraîne ; les deux ressources ne se concurrencent pas.
+Le professeur (Qwen2.5-1.5B-Instruct) tourne sur Colab en **étiquetage seulement** : sorties courtes, quelques heures de T4, pendant que Kaggle entraîne. Il ne génère pas de dialogues : 150 Mo de dialogues générés représenteraient ~40 M de tokens, hors de portée du budget Colab, pour un gain faible face aux jeux publics.
 
 ## 6. Entraînement
 
 ### 6.1 Étapes
 
 1. **Pré-entraînement octets** (~60 % du compute). Prochain octet sur documents concaténés séparés par SEG + en-tête minimal, séquences de 4 096 à 8 192 octets, batch effectif ~0,5 M octets. Apprend le français, le code, la structure UTF-8, l'habitude des en-têtes.
-2. **Entraînement ruban** (~35 %). Conversations et épisodes reformatés en rubans (§4.3) avec décisions fournies par l'oracle (§6.2). Séquences jusqu'à 16 384 octets ; historiques plus longs tronqués côté ancien (la partie non lue n'existe pas dans le ruban puisque STOP tombe avant).
+2. **Entraînement ruban** (~35 %). Conversations et épisodes reformatés en rubans (§4.3) avec décisions fournies par l'oracle (§6.2). Chaque ruban est rembourré à un multiple de 512 octets (poids nul sur le rembourrage) et plusieurs rubans sont **empaquetés** en séquences fixes de 16 384 octets : formes constantes, graphe DDP statique, module d'écriture du Buffer toujours actif. Comme les débuts de ruban tombent sur des frontières de bloc, la Mémoire et les slots y sont remis à zéro par échantillon, exactement comme un nouveau tour à l'inférence. Chaque position porte quatre informations : octet, mode (ENCODE / SCAN / GENERATE), classe de poids de perte, drapeaux (réinitialisation Mémoire, réinitialisation slots). Les historiques trop longs sont tronqués côté ancien (la partie non lue n'existe pas dans le ruban puisque STOP tombe avant). L'entraînement reprend les poids du pré-entraînement avec un optimiseur neuf (taux 1e-4, warmup 5 %). Validation à chaque checkpoint : bits par octet, et **exactitude des décisions contre l'oracle** en forçage sur des épisodes tenus à part.
 3. **Sonde Buffer** (~5 %). Modèle figé ; traducteur entraîné sur (slots, résumé du professeur).
 
 ### 6.2 L'oracle des décisions
@@ -212,14 +220,14 @@ Le professeur tourne sur Colab pendant que Kaggle entraîne ; les deux ressource
 Les codes de contrôle cibles sont **calculés**, jamais devinés :
 
 - **Épisodes synthétiques** (source principale). Générateur procédural de conversations et de documents où l'information nécessaire est placée à des positions connues : faits injectés (« mon code postal est… » puis question 30 tours plus tard), suivi de variables, questions « qu'ai-je dit sur X », réponse présente dans un document joint parmi N (N de 1 à 50, tailles de 100 o à 200 ko), ou absente partout (le modèle doit dire qu'il ne sait pas après avoir tout lu). L'oracle en déduit exactement : SKIP pour les documents non pertinents (d'après l'en-tête : nom/type sans rapport), READ sinon ; STOP après le segment qui complète l'information ; NEXT si l'historique ne suffit pas ; CONT ailleurs.
-- **Dialogues réels** (instructions FR, dialogues générés). Le professeur indique, pour la dernière question, quels tours passés sont nécessaires (un appel par exemple). Défaut conservateur si l'étiquette est douteuse : tout lire (STOP au dernier segment).
-- **REFRESH**. Heuristique de longueur variable : pour toute réponse dépassant L octets, L tiré dans [256, 1024], insérer REFRESH tous les L octets avec re-balayage complet. La variabilité évite l'apprentissage d'une longueur fixe et laisse le modèle émettre REFRESH à l'inférence.
+- **Dialogues réels** (dialogues français publics). Le professeur indique, pour la dernière question, quels tours passés sont nécessaires (un appel par exemple). Défaut conservateur si l'étiquette est douteuse : tout lire (STOP au dernier segment).
+- **REFRESH et NOTE**. Deux sources. (i) Épisodes synthétiques à deux informations : la réponse a besoin de deux faits ; le ruban lit jusqu'au premier, commence à répondre, puis émet `NOTE il manque <ce qui manque> REFRESH` et relit ; la note est templée par le générateur, qui sait ce qui manque. (ii) Heuristique de longueur pour les réponses longues : pour toute réponse dépassant L octets, L tiré dans [256, 1024], insérer `NOTE réponse longue, suite REFRESH` tous les L octets avec re-balayage complet. La variabilité évite l'apprentissage d'une longueur fixe et laisse le modèle émettre REFRESH à l'inférence.
 - **Bruit**. 10 % des épisodes contiennent des en-têtes trompeurs (nom pertinent, contenu non) pour que SKIP ne repose pas uniquement sur le nom.
 - **RECALL**. Plus longue correspondance : pendant la construction du ruban, le contrôleur remplit les Extraits exactement comme à l'inférence ; à chaque position de la réponse, si les k prochains octets (k ≥ 8) égalent une cellule présente, la cible devient RECALL + adresse de cette cellule, et les k octets sont réinjectés comme entrée à poids nul. La tête de rappel est entraînée par entropie croisée sur les cellules présentes dans l'épisode. Les épisodes synthétiques sont construits pour que la réponse cite des identifiants, nombres et lignes des documents lus.
 
 ### 6.3 Pertes et pondération
 
-Entropie croisée sur tout le ruban, pondérée par type de position : octets de réponse ×1 ; codes de contrôle ×5 (rares, critiques) ; octets balayés ×0,1 (signal LM gratuit) ; en-têtes ×0,1 ; marqueurs insérés par le contrôleur, octets d'adresse et octets développés d'un rappel ×0 (jamais prédits par la tête d'octets). La tête de rappel a sa propre entropie croisée sur les cellules, pondérée ×1.
+Entropie croisée sur tout le ruban, pondérée par type de position : octets de réponse et de note ×1 ; codes de contrôle ×5 (rares, critiques) ; octets balayés et octets de la requête ×0,1 (signal LM gratuit) ; en-têtes ×0,1 ; marqueurs insérés par le contrôleur, rembourrage, octets d'adresse et octets développés d'un rappel ×0 (jamais prédits par la tête d'octets). La tête de rappel a sa propre entropie croisée sur les cellules, pondérée ×1.
 
 ### 6.4 Stabilité en fp16 sur T4
 
@@ -295,7 +303,9 @@ relis/
     extraits.py cellules (octets, clé), remplissage par spans, tête de rappel, seuil ; désactivable
     relis.py  assemblage, modes, API forward(bytes, mode, state, buffer)
     state.py   Mémoire : reset(), size_bytes(), to/from checkpoint
-  data/        pipelines FR / code / dialogues ; générateur d'épisodes synthétiques ; professeur
+  data/        shards.py, dataset.py, prepare.py (pré-entraînement) ; dialogues.py (sources FR publiques),
+               episodes.py (générateur synthétique + oracle), teacher.py (étiquetage Colab),
+               pack.py (rubans rembourrés à 512, empaquetés en 16 384, quatre tableaux parallèles)
   train/       pretrain.py, tape_train.py, probe_train.py, reprise HF Hub
   infer/       controller.py (boucle, événements), constrain.py (UTF-8 + phases), cli.py, app.py
   eval/        bpb.py, needle.py, decisions.py, docs.py, judge.py
