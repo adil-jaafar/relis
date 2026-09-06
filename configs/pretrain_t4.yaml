@@ -16,8 +16,10 @@ train:
   batch_size: 8          # par GPU
   grad_accum: 8          # batch effectif 2 GPU × 8 × 8 × 4096 ≈ 0,5 M octets (spec §6.1)
   lr: 3.0e-4
-  warmup_steps: 2000
-  max_steps: 4000        # ≈ 2 Go d'octets ; ajuster selon le débit mesuré
+  warmup_frac: 0.1       # warmup = 10 % du run, quel que soit max_steps (prime sur warmup_steps)
+  warmup_steps: 2000     # ignoré tant que warmup_frac est défini
+  max_steps: 2500        # ≈ 1,3 Go d'octets ; mesuré sur 2×T4 : ~56 s/pas → ~39 h, trois sessions Kaggle
+  compile: false         # torch.compile sur le cœur GDN ; mesurer d'abord avec `bench --compile`
   weight_decay: 0.1
   grad_clip: 1.0
   amp: true
@@ -27,5 +29,7 @@ train:
   hub_every_minutes: 120 # le local reste à 30 min ; le Hub coûte du quota LFS
   time_budget_hours: 11.5 # Kaggle coupe à 12 h : sortir proprement avant
 data:
+  # Kaggle monte en réalité sous /kaggle/input/datasets/<utilisateur>/relis-shards/ ; si le chemin
+  # ci-dessous n'existe pas, pretrain.py cherche un fichier du même nom sous /kaggle/input.
   train_bin: /kaggle/input/relis-shards/train.bin
   val_bin: /kaggle/input/relis-shards/val.bin
