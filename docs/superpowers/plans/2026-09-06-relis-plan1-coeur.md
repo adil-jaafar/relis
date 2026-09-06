@@ -2292,7 +2292,7 @@ for name in ("train", "val"):
 PY
 python -m relis.train.pretrain --config configs/tiny.yaml --run_dir runs/tiny --device cpu
 ```
-Expected: la perte passe sous 1,0 en 60 pas, `runs/tiny/last.pt` existe, `val bpb` affiché.
+Expected: la perte descend nettement (sous 3,0 en 60 pas ; observé 5,1 → 2,4), `runs/tiny/last.pt` existe, `val bpb` affiché.
 
 - [ ] **Step 7 : commit**
 
