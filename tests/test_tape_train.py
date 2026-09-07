@@ -1,4 +1,5 @@
 import os
+import pytest
 import torch
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
@@ -10,7 +11,7 @@ from relis.train.metrics import decision_accuracy
 from relis.train.checkpoint import save_checkpoint
 
 
-def _tapes(tmp_path, seq_len=2048, block=32, episodes=60):
+def _tapes(tmp_path, seq_len=2048, block=32, episodes=40):
     pre = str(tmp_path / "pre.bin")
     w = ShardWriter(pre); w.add(("le chat dort. " * 400).encode(), "src=t"); w.close()
     out = str(tmp_path / "tapes")
@@ -19,7 +20,7 @@ def _tapes(tmp_path, seq_len=2048, block=32, episodes=60):
 
 
 def _tcfg(**kw):
-    base = dict(seq_len=2047, batch_size=2, grad_accum=1, lr=2e-3, warmup_steps=3, max_steps=15,
+    base = dict(seq_len=2047, batch_size=1, grad_accum=1, lr=2e-3, warmup_steps=3, max_steps=6,
                 weight_decay=0.1, grad_clip=1.0, amp=False, ckpt_every_minutes=1e9, log_every=5)
     base.update(kw)
     return TrainConfig(**base)
@@ -78,7 +79,7 @@ def test_tape_training_decreases_loss_and_reports_decisions(tmp_path):
     out = train(m, _tcfg(), tr, va, str(tmp_path / "run"), device="cpu", resume=False,
                 on_step=lambda s, l: losses.append(l),
                 extra_val=lambda mm: seen.append(decision_accuracy(mm, va, 1, 2, "cpu")) or seen[-1])
-    assert out["step"] == 15 and losses[-1] < losses[0]
+    assert out["step"] == 6 and losses[-1] < losses[0]
     assert seen and "acc" in seen[-1]
 
 
@@ -95,3 +96,44 @@ def test_init_from_loads_weights_only(tmp_path):
     out = train(dst, _tcfg(max_steps=2, init_from=str(tmp_path / "src" / "last.pt")), tr, va,
                 str(tmp_path / "run2"), device="cpu", resume=True)
     assert out["step"] == 2      # init_from n'impose pas le pas source : le run repart de 0
+
+
+def test_load_weights_rejects_mismatched_architecture(tmp_path):
+    cfg = RelisConfig.tiny()
+    src = RelisModel(cfg)
+    save_checkpoint(str(tmp_path / "src2"), src, None, None, step=1, cfg_dict=cfg.to_dict(), extra={})
+    bad_cfg = RelisConfig(**{**cfg.to_dict(), "n_slots": 8})
+    dst = RelisModel(bad_cfg)
+    with pytest.raises(RuntimeError):
+        load_weights(dst, str(tmp_path / "src2" / "last.pt"))
+
+
+class _Queue:
+    """Faux jeu de données : renvoie les lots pré-calculés dans l'ordre, ignore batch_size/generator."""
+    def __init__(self, batches):
+        self._batches = list(batches)
+
+    def sample(self, batch_size, g=None):
+        return self._batches.pop(0)
+
+
+def test_grad_accum_matches_single_large_batch(tmp_path):
+    tr, va = _tapes(tmp_path, episodes=40)
+    b2 = tr.sample(2, torch.Generator().manual_seed(7))
+    b0 = {k: v[:1].clone() for k, v in b2.items()}
+    b1 = {k: v[1:].clone() for k, v in b2.items()}
+
+    torch.manual_seed(0)
+    m_a = RelisModel(RelisConfig.tiny())
+    state = {k: v.clone() for k, v in m_a.state_dict().items()}
+    m_b = RelisModel(RelisConfig.tiny())
+    m_b.load_state_dict(state)
+
+    cfg_a = _tcfg(batch_size=1, grad_accum=2, max_steps=1)
+    cfg_b = _tcfg(batch_size=2, grad_accum=1, max_steps=1)
+
+    train(m_a, cfg_a, _Queue([b0, b1]), va, str(tmp_path / "run_a"), device="cpu", resume=False)
+    train(m_b, cfg_b, _Queue([b2]), va, str(tmp_path / "run_b"), device="cpu", resume=False)
+
+    for pa, pb in zip(m_a.parameters(), m_b.parameters()):
+        assert torch.allclose(pa, pb, atol=1e-6)

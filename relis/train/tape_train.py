@@ -53,8 +53,8 @@ def main(argv=None):
             model, device_ids=[torch.cuda.current_device()],
             find_unused_parameters=args.find_unused_parameters, static_graph=args.static_graph)
 
-    train_dir = os.path.dirname(resolve_data_path(os.path.join(data["train_dir"], "meta.json")))
-    val_dir = os.path.dirname(resolve_data_path(os.path.join(data["val_dir"], "meta.json")))
+    train_dir = os.path.dirname(resolve_data_path(os.path.join(data["train_dir"], "meta.json"), tail=2))
+    val_dir = os.path.dirname(resolve_data_path(os.path.join(data["val_dir"], "meta.json"), tail=2))
     train_ds, val_ds = TapeWindows(train_dir), TapeWindows(val_dir)
     extra = lambda m: decision_accuracy(m, val_ds, n_batches=4, batch_size=max(1, tcfg.batch_size), device=device)
     out = train(model, tcfg, train_ds, val_ds, args.run_dir, device=device,

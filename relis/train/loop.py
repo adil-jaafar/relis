@@ -86,7 +86,9 @@ def _as_batch(b) -> dict:
     return {"x": x, "y": y}
 
 
-def _loss(model, batch, device, amp):
+def _loss(model, batch, device, amp, norm: "torch.Tensor | float | None" = None):
+    """`norm` : diviseur explicite (Σ w sur le lot effectif complet, sous accumulation de
+    gradient) ; si None, normalise localement (moyenne, ou moyenne pondérée si `w` est présent)."""
     b = _as_batch(batch)
     x, y = b["x"].to(device), b["y"].to(device)
     core = _unwrap(model)
@@ -102,9 +104,9 @@ def _loss(model, batch, device, amp):
         logits, _ = model(x, mode, state, **kw)
     ce = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="none")
     if b.get("w") is None:
-        return ce.mean()
+        return ce.sum() / norm if norm is not None else ce.mean()
     w = b["w"].to(device).reshape(-1).float()
-    return (ce * w).sum() / w.sum().clamp_min(1e-6)
+    return (ce * w).sum() / norm if norm is not None else (ce * w).sum() / w.sum().clamp_min(1e-6)
 
 
 def load_weights(model, init_from: str) -> int:
@@ -114,9 +116,7 @@ def load_weights(model, init_from: str) -> int:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(init_from, "last.pt", token=os.environ.get("HF_TOKEN"), local_dir="hub_init")
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    missing, unexpected = _unwrap(model).load_state_dict(payload["model"], strict=False)
-    if missing or unexpected:
-        print(f"[init_from] clés manquantes : {missing} ; inattendues : {unexpected}")
+    _unwrap(model).load_state_dict(payload["model"], strict=True)
     return int(payload.get("step", 0))
 
 
@@ -205,10 +205,17 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         for grp in opt.param_groups:
             grp["lr"] = lr_at(step, tcfg)
         opt.zero_grad(set_to_none=True)
+        batches = [train_ds.sample(tcfg.batch_size, g) for _ in range(tcfg.grad_accum)]
+        w_total = 0.0
+        for bb in batches:
+            bd = _as_batch(bb)
+            w_total += float(bd["w"].sum().item()) if bd.get("w") is not None else float(bd["y"].numel())
+        w_total = max(w_total, 1e-6)
         acc = 0.0
-        for _ in range(tcfg.grad_accum):
-            b = train_ds.sample(tcfg.batch_size, g)
-            loss = _loss(model, b, device, tcfg.amp) / tcfg.grad_accum
+        for bb in batches:
+            # norm=w_total : Σ w·ce sur le lot effectif complet (tous les micro-lots de
+            # l'accumulation), pas une moyenne de moyennes locales.
+            loss = _loss(model, bb, device, tcfg.amp, norm=w_total)
             scaler.scale(loss).backward()
             acc += loss.item()
         scaler.unscale_(opt)
