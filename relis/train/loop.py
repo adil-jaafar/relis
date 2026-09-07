@@ -30,6 +30,7 @@ class TrainConfig:
     time_budget_hours: float | None = None  # arrêt propre avant la coupure Kaggle (12 h)
     warmup_frac: float | None = None        # si défini, warmup = warmup_frac × max_steps (prime sur warmup_steps)
     compile: bool = False                   # torch.compile sur le cœur GDN (opt-in, mesurer avec bench --compile)
+    init_from: str | None = None            # poids seuls, si run_dir n'a pas de checkpoint
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -78,14 +79,45 @@ def _unwrap(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _loss(model, x, y, device, amp):
-    x, y = x.to(device), y.to(device)
+def _as_batch(b) -> dict:
+    if isinstance(b, dict):
+        return b
+    x, y = b
+    return {"x": x, "y": y}
+
+
+def _loss(model, batch, device, amp):
+    b = _as_batch(batch)
+    x, y = b["x"].to(device), b["y"].to(device)
     core = _unwrap(model)
     state = core.new_state(x.shape[0], device)
+    kw = {}
+    if b.get("reset") is not None:
+        kw["reset"] = b["reset"].to(device)
+    if b.get("slots_reset") is not None:
+        kw["slots_reset"] = b["slots_reset"].to(device)
+    mode = b["mode"].to(device) if b.get("mode") is not None else 1      # Mode.SCAN par défaut
     with torch.autocast(device_type="cuda" if device.startswith("cuda") else "cpu",
                         dtype=torch.float16, enabled=amp and device.startswith("cuda")):
-        logits, _ = model(x, 1, state)          # Mode.SCAN pour le pré-entraînement
-    return F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), y.reshape(-1))
+        logits, _ = model(x, mode, state, **kw)
+    ce = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="none")
+    if b.get("w") is None:
+        return ce.mean()
+    w = b["w"].to(device).reshape(-1).float()
+    return (ce * w).sum() / w.sum().clamp_min(1e-6)
+
+
+def load_weights(model, init_from: str) -> int:
+    """Charge les poids (seulement) depuis un last.pt local ou un dépôt Hub ; renvoie le pas source."""
+    path = init_from
+    if not os.path.isfile(path):
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(init_from, "last.pt", token=os.environ.get("HF_TOKEN"), local_dir="hub_init")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    missing, unexpected = _unwrap(model).load_state_dict(payload["model"], strict=False)
+    if missing or unexpected:
+        print(f"[init_from] clés manquantes : {missing} ; inattendues : {unexpected}")
+    return int(payload.get("step", 0))
 
 
 def _make_optimizer(model, cfg: TrainConfig):
@@ -105,15 +137,16 @@ def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
     g = torch.Generator().manual_seed(1234)
     total, count = 0.0, 0
     for _ in range(n_batches):
-        x, y = ds.sample(batch_size, g)
-        loss = _loss(model, x, y, device, amp=False)
+        b = ds.sample(batch_size, g)
+        loss = _loss(model, b, device, amp=False)
+        y = _as_batch(b)["y"]
         total += loss.item() * y.numel(); count += y.numel()
     model.train()
     return total / count / math.log(2)
 
 
 def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
-          resume=True, on_step=None) -> dict:
+          resume=True, on_step=None, extra_val=None) -> dict:
     assert tcfg.seq_len >= _unwrap(model).cfg.block, (
         "seq_len doit être ≥ block : sinon le module d'écriture du Buffer ne reçoit "
         "aucun gradient et DDP échoue")
@@ -134,6 +167,10 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         info = load_checkpoint(run_dir, _unwrap(model), opt, scaler)
         if info is not None:
             step = info["step"]
+    if step == 0 and tcfg.init_from:
+        src_step = load_weights(model, tcfg.init_from)
+        if is_main:
+            print(f"[init_from] poids chargés depuis {tcfg.init_from} (pas source {src_step})")
     g = torch.Generator().manual_seed(1000 + step + int(os.environ.get("RANK", "0")))
     last_ckpt = time.time()
     last_hub = time.time()
@@ -147,6 +184,8 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         if not is_main:
             return
         save_checkpoint(run_dir, _unwrap(model), opt, scaler, step, cfg_dict, {"train": asdict(tcfg)})
+        if extra_val is not None and not final:
+            print(f"[val] {extra_val(_unwrap(model))}")
         if not tcfg.hub_repo:
             return
         if not (final or time.time() - last_hub > tcfg.hub_every_minutes * 60):
@@ -168,8 +207,8 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         opt.zero_grad(set_to_none=True)
         acc = 0.0
         for _ in range(tcfg.grad_accum):
-            x, y = train_ds.sample(tcfg.batch_size, g)
-            loss = _loss(model, x, y, device, tcfg.amp) / tcfg.grad_accum
+            b = train_ds.sample(tcfg.batch_size, g)
+            loss = _loss(model, b, device, tcfg.amp) / tcfg.grad_accum
             scaler.scale(loss).backward()
             acc += loss.item()
         scaler.unscale_(opt)
@@ -189,5 +228,7 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
                             batch_size=max(1, tcfg.batch_size // 2), device=device) if is_main else float("nan")
     if is_main:
         print(f"val bpb {val_bpb:.3f}")
+    if is_main and extra_val is not None:
+        print(f"[val] {extra_val(_unwrap(model))}")
     return {"step": step, "last_loss": last_loss, "val_bpb": val_bpb,
             "stopped_by_budget": stopped_by_budget}

@@ -104,3 +104,28 @@ aucun risque pour le run.
 1. `bench --compile` puis `train.compile=true` (voir ci-dessus).
 2. `--override train.seq_len=2048 train.grad_accum=16`.
 3. Vérifier que `amp: true` est bien actif (`torch.cuda.is_available()`).
+
+## Entraînement ruban (plan 2a)
+
+### Une fois : construire les rubans (CPU suffit, ~10 min pour 20 000 épisodes)
+```bash
+python -m relis.data.pack --out shards/tapes --episodes 20000 --seed 0 --seq_len 16384 --block 512 \
+    --replay shards/v1/train.bin --replay_frac 0.2 --val_frac 0.02
+```
+Téléverser `shards/tapes/` (dossiers `train/` et `val/`, quatre `.bin` + `meta.json` chacun) comme Kaggle
+Dataset `relis-tapes`.
+
+### Cellule Kaggle
+```python
+%cd /kaggle/working/relis
+!git pull -q && pip install -q -e .
+!torchrun --nproc_per_node=2 -m relis.train.tape_train \
+    --config configs/tape_t4.yaml --run_dir /kaggle/working/runs/tape1 --static_graph \
+    --override train.hub_repo=<utilisateur>/relis-v1-tape train.init_from=<utilisateur>/relis-v1-pretrain \
+               data.train_dir=/kaggle/input/datasets/<utilisateur>/relis-tapes/train \
+               data.val_dir=/kaggle/input/datasets/<utilisateur>/relis-tapes/val
+```
+`init_from` ne sert qu'au premier lancement (poids du pré-entraînement) ; les sessions suivantes reprennent
+depuis le Hub `relis-v1-tape`. À chaque checkpoint, la ligne `[val] {...}` donne l'exactitude des décisions
+contre l'oracle, globale et par code (READ/SKIP/CONT/STOP/NEXT/END/REFRESH/NOTE) : c'est la métrique qui dit
+si RELIS apprend à *décider*, indépendamment de la perte.

@@ -1,0 +1,33 @@
+model:
+  d_model: 768
+  n_layers: 16
+  swa_every: 4
+  n_heads: 8
+  head_dim: 64
+  window: 512
+  chunk: 64
+  block: 512
+  n_slots: 32
+  mlp_mult: 4
+  conv_kernel: 4
+  grad_checkpoint: true
+train:
+  seq_len: 16383         # séquences empaquetées de 16 384 octets, décalées d'un
+  batch_size: 2          # par GPU : 2 × 16 383 ≈ 32 k octets, même mémoire que le pré-entraînement
+  grad_accum: 8          # 2 GPU × 2 × 8 × 16 383 ≈ 0,5 M octets par pas
+  lr: 1.0e-4
+  warmup_frac: 0.05
+  max_steps: 1500        # ≈ 0,8 Go de rubans ; ajuster au débit mesuré
+  weight_decay: 0.1
+  grad_clip: 1.0
+  amp: true
+  ckpt_every_minutes: 30
+  log_every: 20
+  hub_repo: null         # ex. jaafar2022/relis-v1-tape
+  hub_every_minutes: 120
+  time_budget_hours: 11.5
+  init_from: null        # ex. jaafar2022/relis-v1-pretrain (poids du pré-entraînement)
+  compile: false
+data:
+  train_dir: /kaggle/input/relis-tapes/train
+  val_dir: /kaggle/input/relis-tapes/val

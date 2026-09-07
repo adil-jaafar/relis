@@ -1,0 +1,28 @@
+data:
+  train_dir: shards/tapes_tiny/train
+  val_dir: shards/tapes_tiny/val
+model:
+  block: 32
+  chunk: 8
+  conv_kernel: 4
+  d_model: 64
+  grad_checkpoint: false
+  head_dim: 16
+  mlp_mult: 2
+  n_heads: 2
+  n_layers: 4
+  n_slots: 4
+  swa_every: 4
+  window: 16
+train:
+  amp: false
+  batch_size: 2
+  ckpt_every_minutes: 30
+  grad_accum: 1
+  grad_clip: 1.0
+  log_every: 10
+  lr: 0.002
+  max_steps: 30
+  seq_len: 511
+  warmup_steps: 3
+  weight_decay: 0.1
