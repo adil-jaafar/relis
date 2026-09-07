@@ -25,10 +25,11 @@ def test_pack_sets_flags_at_tape_starts_on_block_multiples():
         starts = np.flatnonzero(s["flags"] & FLAG_SLOTS)
         assert len(starts) == s["n_tapes"] and starts[0] == 0
         assert all(st % 32 == 0 for st in starts)
-        assert all(s["flags"][st] & FLAG_RESET for st in starts)
-        # les resets internes (REFRESH) ne portent pas le bit slots
-        internal = np.flatnonzero((s["flags"] & FLAG_RESET) & ~(s["flags"] & FLAG_SLOTS))
-        assert all(st not in starts for st in internal)
+        has_reset = (s["flags"] & FLAG_RESET) != 0
+        has_slots = (s["flags"] & FLAG_SLOTS) != 0
+        assert not (has_slots & ~has_reset).any()          # un début de ruban porte toujours le bit reset
+        internal = np.flatnonzero(has_reset & ~has_slots)   # REFRESH internes : reset sans slots
+        assert all(st not in set(starts.tolist()) for st in internal)
 
 
 def test_replay_tape_is_full_length_weight_one(tmp_path):
@@ -54,7 +55,9 @@ def test_writer_and_dataset_roundtrip(tmp_path):
     b = ds.sample(3, torch.Generator().manual_seed(0))
     assert b["x"].shape == (3, 2047) and b["y"].shape == (3, 2047)
     assert torch.equal(b["x"][:, 1:], b["y"][:, :-1])
-    assert b["w"].dtype == torch.float32 and set(b["w"].unique().tolist()) <= set(WEIGHTS)
+    assert b["w"].dtype == torch.float32
+    uniq = b["w"].unique().tolist()
+    assert all(any(abs(u - w) < 1e-6 for w in WEIGHTS) for u in uniq)
     assert b["reset"].dtype == torch.bool and b["slots_reset"].dtype == torch.bool
     pos = torch.nonzero(b["slots_reset"])[:, 1]
     assert (pos % 32 == 0).all()
