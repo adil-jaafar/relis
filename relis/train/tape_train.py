@@ -56,7 +56,13 @@ def main(argv=None):
     train_dir = os.path.dirname(resolve_data_path(os.path.join(data["train_dir"], "meta.json"), tail=2))
     val_dir = os.path.dirname(resolve_data_path(os.path.join(data["val_dir"], "meta.json"), tail=2))
     train_ds, val_ds = TapeWindows(train_dir), TapeWindows(val_dir)
-    extra = lambda m: decision_accuracy(m, val_ds, n_batches=4, batch_size=max(1, tcfg.batch_size), device=device)
+    for tag, ds in (("train", train_ds), ("val", val_ds)):
+        assert ds.seq_len == tcfg.seq_len + 1, (
+            f"shard {tag} : seq_len empaqueté {ds.seq_len} incompatible avec train.seq_len "
+            f"{tcfg.seq_len} ; les rubans sont décalés d'un octet, il faut "
+            f"seq_len empaqueté == train.seq_len + 1 (ici {tcfg.seq_len + 1})")
+    extra = lambda m: decision_accuracy(m, val_ds, n_batches=tcfg.val_batches,
+                                        batch_size=max(1, tcfg.batch_size), device=device)
     out = train(model, tcfg, train_ds, val_ds, args.run_dir, device=device,
                 resume=not args.no_resume, extra_val=extra)
     if int(os.environ.get("RANK", "0")) == 0:

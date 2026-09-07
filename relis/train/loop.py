@@ -25,6 +25,7 @@ class TrainConfig:
     amp: bool = True
     ckpt_every_minutes: float = 30.0
     log_every: int = 20
+    val_batches: int = 4                     # lots de validation (bits_per_byte, exactitude des décisions)
     hub_repo: str | None = None
     hub_every_minutes: float = 120.0        # le Hub coûte cher : bien plus rare que le local
     time_budget_hours: float | None = None  # arrêt propre avant la coupure Kaggle (12 h)
@@ -79,6 +80,11 @@ def _unwrap(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _metric_label(batch) -> str:
+    """`wce` (entropie croisée pondérée par position) si le lot porte des poids, sinon `bpb`."""
+    return "wce" if _as_batch(batch).get("w") is not None else "bpb"
+
+
 def _as_batch(b) -> dict:
     if isinstance(b, dict):
         return b
@@ -109,12 +115,25 @@ def _loss(model, batch, device, amp, norm: "torch.Tensor | float | None" = None)
     return (ce * w).sum() / norm if norm is not None else (ce * w).sum() / w.sum().clamp_min(1e-6)
 
 
-def load_weights(model, init_from: str) -> int:
-    """Charge les poids (seulement) depuis un last.pt local ou un dépôt Hub ; renvoie le pas source."""
-    path = init_from
-    if not os.path.isfile(path):
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(init_from, "last.pt", token=os.environ.get("HF_TOKEN"), local_dir="hub_init")
+def fetch_weights_path(init_from: str, local_dir: str = "hub_init") -> str:
+    """Chemin local du `last.pt` de `init_from` ; ne télécharge que si nécessaire.
+
+    Un fichier local est renvoyé tel quel. Sinon, si `local_dir/last.pt` existe déjà
+    (téléchargé par le rang 0), il est renvoyé sans toucher au réseau : c'est ce qui
+    permet aux rangs non maîtres de charger les poids après la barrière, sans que
+    plusieurs processus écrivent le même fichier en même temps.
+    """
+    if os.path.isfile(init_from):
+        return init_from
+    cached = os.path.join(local_dir, "last.pt")
+    if os.path.isfile(cached):
+        return cached
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(init_from, "last.pt", token=os.environ.get("HF_TOKEN"), local_dir=local_dir)
+
+
+def load_weights(model, path: str) -> int:
+    """Charge les poids (seulement) depuis un `last.pt` local ; renvoie le pas source."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     _unwrap(model).load_state_dict(payload["model"], strict=True)
     return int(payload.get("step", 0))
@@ -133,6 +152,13 @@ def _make_optimizer(model, cfg: TrainConfig):
 
 @torch.no_grad()
 def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
+    """Perte moyenne par position divisée par ln 2.
+
+    Sur un jeu non pondéré c'est bien des bits par octet. Sur un jeu pondéré
+    (rubans : `w` présent), `_loss` renvoie une entropie croisée **pondérée** par
+    position : la valeur est alors une CE pondérée / ln 2, à lire comme `wce`, pas
+    comme un bpb comparable au pré-entraînement. Le nom reste pour la compatibilité.
+    """
     model.eval()
     g = torch.Generator().manual_seed(1234)
     total, count = 0.0, 0
@@ -168,7 +194,13 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         if info is not None:
             step = info["step"]
     if step == 0 and tcfg.init_from:
-        src_step = load_weights(model, tcfg.init_from)
+        # Un seul rang télécharge (écritures concurrentes dans hub_init/ sinon) ; la
+        # barrière garantit que le fichier est complet avant que les autres le lisent.
+        if is_main:
+            fetch_weights_path(tcfg.init_from)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        src_step = load_weights(model, fetch_weights_path(tcfg.init_from))
         if is_main:
             print(f"[init_from] poids chargés depuis {tcfg.init_from} (pas source {src_step})")
     g = torch.Generator().manual_seed(1000 + step + int(os.environ.get("RANK", "0")))
@@ -227,14 +259,16 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         if on_step is not None:
             on_step(step, acc)
         if is_main and step % tcfg.log_every == 0:
-            print(f"step {step} loss {acc:.4f} bpb {acc/math.log(2):.3f} lr {lr_at(step, tcfg):.2e}")
+            unit = _metric_label(batches[0])
+            print(f"step {step} loss {acc:.4f} {unit} {acc/math.log(2):.3f} lr {lr_at(step, tcfg):.2e}")
         if time.time() - last_ckpt > tcfg.ckpt_every_minutes * 60:
             _save(); last_ckpt = time.time()
     _save(final=True)
-    val_bpb = bits_per_byte(_unwrap(model), val_ds, tcfg.seq_len, n_batches=4,
+    val_bpb = bits_per_byte(_unwrap(model), val_ds, tcfg.seq_len, n_batches=tcfg.val_batches,
                             batch_size=max(1, tcfg.batch_size // 2), device=device) if is_main else float("nan")
     if is_main:
-        print(f"val bpb {val_bpb:.3f}")
+        unit = _metric_label(val_ds.sample(1, torch.Generator().manual_seed(0)))
+        print(f"val {unit} {val_bpb:.3f}")
     if is_main and extra_val is not None:
         print(f"[val] {extra_val(_unwrap(model))}")
     return {"step": step, "last_loss": last_loss, "val_bpb": val_bpb,

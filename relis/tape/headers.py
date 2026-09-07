@@ -5,7 +5,9 @@ MAX_BYTES = 120
 
 
 def _clean(value) -> str:
-    s = str(value).replace(";", " ").replace("=", " ")
+    s = str(value)
+    for ch in (";", "=", "\t", "\n", "\r"):   # séparateurs et sauts de ligne
+        s = s.replace(ch, " ")
     return C.sanitize(s.encode("utf-8")).decode("utf-8", errors="replace")
 
 

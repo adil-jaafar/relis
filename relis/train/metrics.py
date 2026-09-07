@@ -2,6 +2,7 @@
 import torch
 
 from relis.tape import codes as C
+from relis.tape.tape import WEIGHTS, W_HIGH
 from .loop import _as_batch, _unwrap
 
 _DECISIONS = sorted(C.DECISION_CODES)
@@ -24,7 +25,9 @@ def decision_accuracy(model, ds, n_batches: int, batch_size: int, device: str) -
         is_dec = torch.zeros_like(y, dtype=torch.bool)
         for c in _DECISIONS:
             is_dec |= y == c
-        is_dec &= w > 0
+        # positions de décision de l'oracle : classe de poids W_HIGH exactement
+        # (un octet valant un code de décision peut apparaître dans du texte parcouru)
+        is_dec &= (w - WEIGHTS[W_HIGH]).abs() < 1e-6
         for c in _DECISIONS:
             sel = is_dec & (y == c)
             n = int(sel.sum())
