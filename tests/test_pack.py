@@ -109,3 +109,33 @@ def test_build_shards_reports_mix(tmp_path):
 def test_implied_epochs_is_pure_arithmetic():
     assert implied_epochs(100, 32, 1500) == 480.0
     assert implied_epochs(14000, 32, 1500) == 32 * 1500 / 14000
+
+
+def test_build_shards_val_split_is_deterministic_and_disjoint(tmp_path):
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    kw = dict(episodes=200, seed=3, seq_len=2048, block=32, replay=None, replay_frac=0.0, val_frac=0.1)
+    sa = build_shards(a, **kw)
+    sb = build_shards(b, **kw)
+    va = open(os.path.join(a, "val", "data.bin"), "rb").read()
+    vb = open(os.path.join(b, "val", "data.bin"), "rb").read()
+    assert va == vb and len(va) > 0                       # même graine → même val
+    ta = open(os.path.join(a, "train", "data.bin"), "rb").read()
+    seq = 2048
+    val_seqs = {va[i:i + seq] for i in range(0, len(va), seq)}
+    train_seqs = {ta[i:i + seq] for i in range(0, len(ta), seq)}
+    assert not (val_seqs & train_seqs)                    # aucune séquence partagée
+    frac = sa["val_seqs"] / (sa["val_seqs"] + sa["train_seqs"])
+    assert 0.05 <= frac <= 0.15                           # val_frac 0,1 à ±50 %
+
+
+def test_tape_storage_is_compact():
+    import sys
+    from relis.tape.tape import Tape
+    from relis.tape import codes as C
+    t = Tape()
+    for i in range(10_000):
+        t.put(i % 256, int(C.Mode.SCAN), W_LOW)
+    assert len(t) == 10_000
+    assert sys.getsizeof(t.mode) < 20_000
+    assert sys.getsizeof(t.wclass) < 20_000 and sys.getsizeof(t.reset) < 20_000
+    assert t.mode[5] == int(C.Mode.SCAN) and t.wclass[5] == W_LOW and t.reset[5] == 0

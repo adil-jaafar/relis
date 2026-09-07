@@ -27,7 +27,8 @@ _WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32)
 
 def pad_tape(tape: Tape, block: int) -> Tape:
     n = (-len(tape)) % block
-    out = Tape(bytearray(tape.data), list(tape.mode), list(tape.wclass), list(tape.reset))
+    out = Tape(bytearray(tape.data), bytearray(tape.mode), bytearray(tape.wclass),
+               bytearray(tape.reset))
     for _ in range(n):
         out.put(PAD, int(C.Mode.SCAN), 0)
     return out
@@ -42,40 +43,73 @@ def _to_arrays(tape: Tape):
     return data, mode, wclass, flags
 
 
-def pack_tapes(tapes, seq_len: int, block: int, stats: dict | None = None):
-    """Empaquetage glouton : on ajoute les rubans tant qu'ils tiennent ; le reste est rembourré."""
-    assert seq_len % block == 0
-    if stats is not None:
-        stats.setdefault("skipped", 0); stats.setdefault("packed", 0)
-        stats.setdefault("tape_bytes", 0)
-    cur = []; used = 0
+class Packer:
+    """Empaquetage glouton en flux : `add(tape)` accumule, `close()` vide la fin.
 
-    def flush():
-        data = np.full(seq_len, PAD, dtype=np.uint8)
-        mode = np.full(seq_len, int(C.Mode.SCAN), dtype=np.uint8)
-        wclass = np.zeros(seq_len, dtype=np.uint8)
-        flags = np.zeros(seq_len, dtype=np.uint8)
+    Chaque séquence pleine part immédiatement dans `writer.add(...)` ; aucun ruban
+    n'est conservé au-delà de la séquence en cours, ce qui permet d'empaqueter
+    100 000 épisodes à mémoire constante.
+    """
+
+    def __init__(self, seq_len: int, block: int, writer, stats: dict | None = None):
+        assert seq_len % block == 0
+        self.seq_len, self.block, self.writer, self.stats = seq_len, block, writer, stats
+        if stats is not None:
+            stats.setdefault("skipped", 0); stats.setdefault("packed", 0)
+            stats.setdefault("tape_bytes", 0)
+        self.cur = []
+        self.used = 0
+
+    def _flush(self) -> None:
+        data = np.full(self.seq_len, PAD, dtype=np.uint8)
+        mode = np.full(self.seq_len, int(C.Mode.SCAN), dtype=np.uint8)
+        wclass = np.zeros(self.seq_len, dtype=np.uint8)
+        flags = np.zeros(self.seq_len, dtype=np.uint8)
         off = 0
-        for d, m, w, f in cur:
+        for d, m, w, f in self.cur:
             data[off:off + len(d)] = d; mode[off:off + len(d)] = m
             wclass[off:off + len(d)] = w; flags[off:off + len(d)] = f
             off += len(d)
-        return {"data": data, "mode": mode, "wclass": wclass, "flags": flags, "n_tapes": len(cur)}
+        n = len(self.cur)
+        self.cur, self.used = [], 0
+        self.writer.add({"data": data, "mode": mode, "wclass": wclass, "flags": flags, "n_tapes": n})
 
+    def add(self, tape: Tape) -> None:
+        p = pad_tape(tape, self.block)
+        if len(p) > self.seq_len:
+            if self.stats is not None:
+                self.stats["skipped"] += 1
+            return
+        if self.used + len(p) > self.seq_len:
+            self._flush()
+        self.cur.append(_to_arrays(p)); self.used += len(p)
+        if self.stats is not None:
+            self.stats["packed"] += 1; self.stats["tape_bytes"] += len(tape)
+
+    def close(self) -> None:
+        if self.cur:
+            self._flush()
+
+
+class _ListSink:
+    def __init__(self):
+        self.seqs = []
+
+    def add(self, packed: dict) -> None:
+        self.seqs.append(packed)
+
+
+def pack_tapes(tapes, seq_len: int, block: int, stats: dict | None = None):
+    """Enveloppe génératrice de `Packer` : rend les séquences au fil de l'eau."""
+    sink = _ListSink()
+    packer = Packer(seq_len, block, sink, stats)
     for t in tapes:
-        p = pad_tape(t, block)
-        if len(p) > seq_len:
-            if stats is not None:
-                stats["skipped"] += 1
-            continue
-        if used + len(p) > seq_len:
-            yield flush()
-            cur, used = [], 0
-        cur.append(_to_arrays(p)); used += len(p)
-        if stats is not None:
-            stats["packed"] += 1; stats["tape_bytes"] += len(t)
-    if cur:
-        yield flush()
+        packer.add(t)
+        while sink.seqs:
+            yield sink.seqs.pop(0)
+    packer.close()
+    while sink.seqs:
+        yield sink.seqs.pop(0)
 
 
 def replay_tape(bin_path: str, seq_len: int, rng: random.Random, wclass: int = W_LOW) -> Tape:
@@ -198,26 +232,45 @@ def _print_mix(name: str, r: dict, prefix: str, seqs_per_step: int, max_steps: i
           f"{implied_epochs(n, seqs_per_step, max_steps):.2f}")
 
 
+class _MixWriter:
+    """Passe-plat vers un `TapeShardWriter` en comptant le mélange des poids."""
+
+    def __init__(self, writer: TapeShardWriter, mix: "_Mix"):
+        self.writer, self.mix, self.n = writer, mix, 0
+
+    def add(self, packed: dict) -> None:
+        self.writer.add(packed); self.mix.add_tape_seq(packed["wclass"]); self.n += 1
+
+
 def build_shards(out: str, episodes: int, seed: int, seq_len: int, block: int,
                  replay: str | None, replay_frac: float, val_frac: float, extra_tapes=None,
                  replay_wclass: int = W_LOW, seqs_per_step: int = REF_SEQS_PER_STEP,
                  max_steps: int = REF_MAX_STEPS) -> dict:
-    """Épisodes synthétiques (+ rubans externes, + rappel) → train/ et val/."""
+    """Épisodes synthétiques (+ rubans externes, + rappel) → train/ et val/, en flux.
+
+    Les épisodes sont construits, répartis et empaquetés un par un : la répartition
+    val/train est déterministe (l'épisode `i` va en val si `i % val_every == 0`), donc
+    aucun mélange — et aucune liste de rubans — n'est nécessaire.
+    """
     rng = random.Random(seed)
-    tapes = [build_tape(s) for s in iter_episodes(seed, episodes)]
-    if extra_tapes:
-        tapes.extend(extra_tapes)
-    rng.shuffle(tapes)
-    n_val = max(1, int(len(tapes) * val_frac))
-    splits = {"val": tapes[:n_val], "train": tapes[n_val:]}
+    val_every = max(2, round(1 / max(1e-9, val_frac)))
+    names = ("train", "val")
+    writers = {n: TapeShardWriter(os.path.join(out, n)) for n in names}
+    mixes = {n: _Mix() for n in names}
+    sinks = {n: _MixWriter(writers[n], mixes[n]) for n in names}
+    st = {n: {} for n in names}
+    packers = {n: Packer(seq_len, block, sinks[n], st[n]) for n in names}
+
+    for i, spec in enumerate(iter_episodes(seed, episodes)):
+        packers["val" if i % val_every == 0 else "train"].add(build_tape(spec))
+    for t in (extra_tapes or ()):
+        packers["train"].add(t)
+    for n in names:
+        packers[n].close()
+
     stats = {}
-    for name, ts in splits.items():
-        wr = TapeShardWriter(os.path.join(out, name))
-        st = {}
-        mix = _Mix()
-        n = 0
-        for s in pack_tapes(ts, seq_len, block, st):
-            wr.add(s); mix.add_tape_seq(s["wclass"]); n += 1
+    for name in names:
+        wr, mix, n = writers[name], mixes[name], sinks[name].n
         if replay and replay_frac > 0 and n > 0:
             n_replay = int(round(n * replay_frac / max(1e-9, 1 - replay_frac)))
             for _ in range(n_replay):
@@ -228,8 +281,8 @@ def build_shards(out: str, episodes: int, seed: int, seq_len: int, block: int,
         wr.close()
         prefix = f"{name}_"
         stats[f"{name}_seqs"] = n
-        stats[f"{name}_skipped"] = st.get("skipped", 0)
-        r = mix.report(prefix, st.get("tape_bytes", 0), st.get("packed", 0))
+        stats[f"{name}_skipped"] = st[name].get("skipped", 0)
+        r = mix.report(prefix, st[name].get("tape_bytes", 0), st[name].get("packed", 0))
         stats.update(r)
         _print_mix(name, r, prefix, seqs_per_step, max_steps)
     return stats

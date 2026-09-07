@@ -32,13 +32,23 @@ class TapeSpec:
 
 @dataclass
 class Tape:
+    """Quatre tableaux parallèles, stockés en `bytearray` (1 octet par position).
+
+    L'API de lecture reste celle d'une séquence d'entiers : `tape.mode[i]`,
+    `tape.wclass[i]` sont des `int`, `tape.reset[i]` vaut 0 ou 1 (et `sum(tape.reset)`
+    compte les réinitialisations). Le stockage compact est ce qui permet
+    d'empaqueter 100 000 épisodes sans saturer la RAM (des listes Python
+    coûteraient ≈ 27 octets par position, contre 4 ici).
+    """
+
     data: bytearray = field(default_factory=bytearray)
-    mode: list = field(default_factory=list)
-    wclass: list = field(default_factory=list)
-    reset: list = field(default_factory=list)
+    mode: bytearray = field(default_factory=bytearray)
+    wclass: bytearray = field(default_factory=bytearray)
+    reset: bytearray = field(default_factory=bytearray)
 
     def put(self, b: int, mode: int, w: int, reset: bool = False) -> None:
-        self.data.append(b); self.mode.append(mode); self.wclass.append(w); self.reset.append(reset)
+        self.data.append(b); self.mode.append(mode); self.wclass.append(w)
+        self.reset.append(1 if reset else 0)
 
     def put_bytes(self, bs: bytes, mode: int, w: int) -> None:
         for b in bs:

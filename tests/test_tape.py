@@ -36,7 +36,7 @@ def test_two_passes_have_note_refresh_and_one_reset():
     assert d.count(bytes([C.REFRESH])) == 1 and d.count(bytes([C.NOTE])) == 2   # une émise, une relue
     assert sum(t.reset) == 1
     i = d.index(bytes([C.REFRESH]))
-    assert d[i + 1] == C.ENC and t.reset[i + 1] is True
+    assert d[i + 1] == C.ENC and t.reset[i + 1] == 1
     # dans la requête de la passe 2 : PART + réponse partielle + NOTE + note, en mode ENCODE et poids 0,1
     j = d.index(bytes([C.PART]))
     assert d[j + 1:j + 6] == b"75012" and t.mode[j + 1] == int(C.Mode.ENCODE) and t.wclass[j + 1] == W_LOW

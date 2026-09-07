@@ -107,11 +107,29 @@ aucun risque pour le run.
 
 ## Entraînement ruban (plan 2a)
 
-### Une fois : construire les rubans (CPU suffit, ~10 min pour 20 000 épisodes)
+### Une fois : construire les rubans (CPU suffit, ≈ 8 min pour 100 000 épisodes)
 ```bash
-python -m relis.data.pack --out shards/tapes --episodes 20000 --seed 0 --seq_len 16384 --block 512 \
+python -m relis.data.pack --out shards/tapes --episodes 100000 --seed 0 --seq_len 16384 --block 512 \
     --replay shards/v1/train.bin --replay_frac 0.2 --val_frac 0.02
 ```
+`--episodes 100000` donne ≈ 14 000 séquences de 16 384 octets (rappel compris). L'empaquetage est en
+flux : la mémoire ne dépend pas du nombre d'épisodes. `--replay_wclass` (1 = 0,1 par défaut, 2 = 1,0,
+3 = 5,0) fixe le poids du rappel ; à 1,0 le rappel écraserait l'objectif.
+
+La commande imprime, pour `train/` et `val/`, le mélange des données — nombre de séquences (rubans et
+rappel), taille moyenne d'un ruban, somme des poids par classe et **parts** (décisions / réponse /
+texte parcouru / rappel) — puis la ligne `epochs_for(32 séq/pas × 1500 pas)`, le nombre de passages
+impliqués par `configs/tape_t4.yaml` (2 GPU × batch 2 × accum 8 = 32 séquences par pas) :
+
+```
+[train] séquences 13375 (rubans 10700, rappel 2675) ; ruban moyen 1380 octets
+[train] somme des poids : décisions 11557000 réponse 17882000 texte 11410000 rappel 4382720
+[train] parts décisions 0.256 réponse 0.395 texte 0.252 rappel 0.097
+[train] epochs_for(32 séq/pas × 1500 pas) = 3.59
+```
+Viser une part de rappel ≤ 0,15 et `epochs_for` entre 3 et 5 : en dessous de ≈ 14 000 séquences le run
+repasse trop souvent sur les mêmes rubans (à 2 800 séquences, ≈ 17 passages).
+
 Téléverser `shards/tapes/` (dossiers `train/` et `val/`, quatre `.bin` + `meta.json` chacun) comme Kaggle
 Dataset `relis-tapes`.
 

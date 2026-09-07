@@ -17,7 +17,8 @@ train:
   grad_accum: 8          # 2 GPU × 2 × 8 × 16 383 ≈ 0,5 M octets par pas
   lr: 1.0e-4
   warmup_frac: 0.05
-  max_steps: 1500        # ≈ 0,8 Go de rubans ; ajuster au débit mesuré
+  max_steps: 1500        # 1500 pas × 32 séquences = 48 000 séquences vues ; viser ≥ 14 000
+                         # séquences (--episodes 100000) soit ≈ 3,4 passages
   weight_decay: 0.1
   grad_clip: 1.0
   amp: true
