@@ -1,4 +1,5 @@
 import random
+import re
 from collections import Counter
 from relis.tape import codes as C
 from relis.tape.tape import build_tape, Segment, validate_spec
@@ -7,6 +8,13 @@ from relis.data.episodes import KINDS, generate_episode, iter_episodes, oracle_p
 
 def _seg(i):
     return Segment(header=f"role=user;i={i}", content=f"tour {i}".encode())
+
+
+def _digit_tokens(text: str) -> set:
+    """Jetons alphanumériques (avec ponctuation interne : dates, IP, codes) contenant
+    au moins un chiffre — sert à repérer la valeur d'un fait dans un texte sans dépendre
+    de sa position (les gabarits ne mettent pas tous {v} en dernier mot)."""
+    return {tok for tok in re.findall(r"[\w./-]+", text, flags=re.UNICODE) if any(c.isdigit() for c in tok)}
 
 
 def test_oracle_stops_at_oldest_needed_history_segment():
@@ -65,6 +73,21 @@ def test_doc_lookup_reads_needed_doc_and_answer_mentions_fact():
     p = spec.passes[0]
     assert p.docs is not None and any(s.read and s.after == C.STOP for s in p.docs)
     assert p.history[-1].after == C.NEXT
+    stop_doc = next(s for s in p.docs if s.read and s.after == C.STOP)
+    answer_tokens = _digit_tokens(spec.answer_parts[0].decode("utf-8"))
+    doc_tokens = _digit_tokens(stop_doc.content.decode("utf-8"))
+    assert answer_tokens and answer_tokens <= doc_tokens          # la valeur du fait est bien dans le doc lu
+
+
+def test_fact_recall_answer_value_is_in_history():
+    rng = random.Random(4)
+    spec = generate_episode(rng, "fact_recall")
+    p = spec.passes[0]
+    stop_idx = next(i for i, s in enumerate(p.history) if s.after == C.STOP)
+    answer = spec.answer_parts[0].decode("utf-8")
+    value = answer.rsplit(" ", 1)[-1].rstrip(".")
+    hits = [i for i, s in enumerate(p.history) if value in s.content.decode("utf-8")]
+    assert hits == [stop_idx]                                     # présent une seule fois, là où l'oracle STOP
 
 
 def test_iter_episodes_is_deterministic_and_covers_kinds():
@@ -77,3 +100,8 @@ def test_iter_episodes_is_deterministic_and_covers_kinds():
         spec = generate_episode(rng)
         counts[len(spec.passes) > 1] += 1
     assert counts[True] > 20 and counts[False] > 100
+
+
+def test_generated_tapes_never_exceed_budget():
+    for spec in iter_episodes(seed=5, n=400):
+        assert len(build_tape(spec)) <= 15_000

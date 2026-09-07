@@ -3,23 +3,31 @@
 Chaque épisode est une conversation construite pour que l'on sache exactement
 où se trouve l'information nécessaire ; l'oracle en déduit READ/SKIP,
 CONT/STOP/NEXT, et la position des REFRESH avec leur NOTE.
+
+Garde-fou de taille : `generate_episode` construit le ruban (via `build_tape`)
+et redemande un tirage (même genre, même rng) tant que sa taille dépasse
+`MAX_TAPE_BYTES`, jusqu'à `MAX_REDRAWS` fois ; au-delà, il lève `RuntimeError`.
+Les plages de remplissage sont choisies pour que ce cas soit rarissime — le
+garde-fou est une ceinture de sécurité, pas le mécanisme principal.
 """
 import random
 
 from relis.tape import codes as C
 from relis.tape.headers import format_header
-from relis.tape.tape import Segment, Pass, TapeSpec
+from relis.tape.tape import Segment, Pass, TapeSpec, build_tape
 
 KINDS = ("fact_recall", "variable_tracking", "what_did_i_say", "doc_lookup", "absent", "two_facts", "long_answer")
 KIND_WEIGHTS = (22, 12, 14, 22, 8, 12, 10)
+MAX_TAPE_BYTES = 15_000
+MAX_REDRAWS = 8
 
 PRENOMS = ["Adil", "Camille", "Nadia", "Julien", "Inès", "Marc", "Sofia", "Karim", "Léa", "Youssef"]
 VILLES = ["Lyon", "Paris", "Rabat", "Lille", "Casablanca", "Bordeaux", "Nantes", "Tunis", "Genève", "Montréal"]
 OBJETS = ["le rapport", "la facture", "le contrat", "le devis", "la présentation", "le planning"]
 SUJETS = ["la réunion", "le budget", "les vacances", "le projet RELIS", "la voiture", "le déménagement",
           "le stage", "la formation", "le serveur", "la thèse"]
-FILLERS_USER = ["Merci pour ton aide.", "D'accord, je note.", "Peux-tu me rappeler l'heure de {sujet} ?",
-                "Parlons de {sujet}.", "Je reviens vers toi demain.", "Qu'en penses-tu ?",
+FILLERS_USER = ["Merci pour ton aide.", "D'accord, je note.", "Peux-tu me rappeler l'heure {de_sujet} ?",
+                "Parlons {de_sujet}.", "Je reviens vers toi demain.", "Qu'en penses-tu ?",
                 "J'ai avancé sur {sujet} ce matin.", "On en reparle plus tard."]
 FILLERS_ASSISTANT = ["Bien sûr.", "Entendu, je m'en occupe.", "Voici ce que je propose pour {sujet}.",
                      "Je reste disponible.", "C'est noté.", "Très bien, continuons."]
@@ -59,9 +67,29 @@ def _stamp(rng, i):
     return f"2026-09-{rng.randint(1, 28):02d}T{rng.randint(8, 19):02d}:{i % 60:02d}"
 
 
+def _de(sujet: str) -> str:
+    """Élision de « de » devant un sujet qui porte déjà son article : « le »/« les »
+    -> « du »/« des », « l' » -> « de l' » ; « la » et le reste restent inchangés
+    (« de la réunion » ne s'élide pas)."""
+    if sujet.startswith("l'"):
+        return "de l'" + sujet[2:]
+    if sujet.startswith("le "):
+        return "du " + sujet[3:]
+    if sujet.startswith("les "):
+        return "des " + sujet[4:]
+    return "de " + sujet
+
+
+def _fill(rng, tpl):
+    """Formate un gabarit de remplissage : tire un sujet et fournit à la fois
+    {sujet} (tel quel) et {de_sujet} (élidé) — un gabarit n'utilise que l'un des deux."""
+    sujet = rng.choice(SUJETS)
+    return tpl.format(sujet=sujet, de_sujet=_de(sujet))
+
+
 def _filler_turn(rng, role, i):
     tpl = rng.choice(FILLERS_USER if role == "user" else FILLERS_ASSISTANT)
-    text = tpl.format(sujet=rng.choice(SUJETS))
+    text = _fill(rng, tpl)
     return Segment(header=format_header({"role": role, "t": _stamp(rng, i)}), content=text.encode("utf-8"))
 
 
@@ -80,7 +108,7 @@ def _history(rng, n_pairs, injections):
 
 def _filler_doc(rng, i):
     name = f"{rng.choice(FILLER_DOC_NAMES)}_{i}.txt"
-    body = " ".join(rng.choice(FILLERS_USER).format(sujet=rng.choice(SUJETS)) for _ in range(rng.randint(2, 25)))
+    body = " ".join(_fill(rng, rng.choice(FILLERS_USER)) for _ in range(rng.randint(2, 25)))
     return Segment(header=format_header({"type": "doc", "name": name, "mime": "text/plain",
                                          "bytes": len(body.encode()), "t": _stamp(rng, i)}),
                    content=body.encode("utf-8"))
@@ -148,7 +176,7 @@ def _variable_tracking(rng):
 def _what_did_i_say(rng):
     sujet = rng.choice(SUJETS); v = rng.choice(["c'est urgent", "c'est reporté", "c'est terminé", "il faut un budget"])
     n = rng.randint(3, 12); at = rng.randint(0, n - 1)
-    hist = _history(rng, n, {at: f"À propos de {sujet} : {v}."})
+    hist = _history(rng, n, {at: f"À propos {_de(sujet)} : {v}."})
     p = oracle_pass(hist, {2 * (n - 1 - at) + 1}, [], None, [])
     return TapeSpec(query=f"Qu'ai-je dit sur {sujet} ?".encode(), passes=[p],
                     answer_parts=[f"Vous avez dit : « {v} ».".encode()], notes=[])
@@ -159,9 +187,9 @@ def _docs_for(rng, topic, sentence, n_docs, noise):
     target = rng.randint(0, n_docs - 1)
     for j in range(n_docs):
         if j == target:
-            body = " ".join([rng.choice(FILLERS_ASSISTANT).format(sujet=rng.choice(SUJETS))
+            body = " ".join([_fill(rng, rng.choice(FILLERS_ASSISTANT))
                              for _ in range(rng.randint(2, 40))] + [sentence] +
-                            [rng.choice(FILLERS_USER).format(sujet=rng.choice(SUJETS)) for _ in range(rng.randint(0, 40))])
+                            [_fill(rng, rng.choice(FILLERS_USER)) for _ in range(rng.randint(0, 40))])
             name = f"{topic}_{rng.randint(1, 99)}.txt"
             docs.append(Segment(header=format_header({"type": "doc", "name": name, "mime": "text/plain",
                                                       "bytes": len(body.encode()), "t": _stamp(rng, j)}),
@@ -218,13 +246,22 @@ def _long_answer(rng):
     n = rng.randint(2, 8); at = rng.randint(0, n - 1)
     hist = _history(rng, n, {at: f[0].format(v=v)})
     p = oracle_pass(hist, {2 * (n - 1 - at) + 1}, [], None, [])
+    prefix = f[2].format(v=v) + " Voici le détail :\n"
     items = [f"{i + 1}. Point {i + 1} concernant {rng.choice(SUJETS)} : {rng.choice(FILLERS_ASSISTANT).format(sujet=rng.choice(SUJETS))}"
              for i in range(rng.randint(16, 24))]
-    answer = (f[2].format(v=v) + " Voici le détail :\n" + "\n".join(items)).encode("utf-8")
-    L = rng.randint(256, 1024)
+    # Garantit au moins 600 octets de réponse : on ajoute des points tant qu'il en manque,
+    # pour que L (borné à len(answer) // 2 ci-dessous) puisse toujours tenir dans [256, 1024].
+    while len((prefix + "\n".join(items)).encode("utf-8")) < 600:
+        i = len(items)
+        items.append(f"{i + 1}. Point {i + 1} concernant {rng.choice(SUJETS)} : "
+                     f"{rng.choice(FILLERS_ASSISTANT).format(sujet=rng.choice(SUJETS))}")
+    answer = (prefix + "\n".join(items)).encode("utf-8")
+    L = rng.randint(256, min(1024, len(answer) // 2))
     parts = [answer[i:i + L] for i in range(0, len(answer), L)]
-    if len(parts) < 2:
-        parts = [answer[:len(answer) // 2], answer[len(answer) // 2:]]
+    # `passes = [p] * len(parts)` alias intentionnellement le même objet Pass pour chaque
+    # passe : toutes relisent exactement le même historique (seul le préfixe PART/NOTE de
+    # la requête change entre les passes, dans build_tape) et Pass n'est jamais modifié en
+    # place — l'aliasing est donc sûr et évite de reconstruire un Pass identique n fois.
     passes = [p] * len(parts)
     notes = [b"r\xc3\xa9ponse longue, suite"] * (len(parts) - 1)
     return TapeSpec(query=(f[1] + " Donne-moi tous les détails.").encode("utf-8"), passes=passes,
@@ -238,7 +275,15 @@ _GEN = {"fact_recall": _fact_recall, "variable_tracking": _variable_tracking, "w
 def generate_episode(rng: random.Random, kind: str | None = None) -> TapeSpec:
     if kind is None:
         kind = rng.choices(KINDS, weights=KIND_WEIGHTS, k=1)[0]
-    return _GEN[kind](rng)
+    spec = _GEN[kind](rng)
+    if len(build_tape(spec)) <= MAX_TAPE_BYTES:
+        return spec
+    for _ in range(MAX_REDRAWS):                    # garde-fou dur : redemande un tirage
+        spec = _GEN[kind](rng)
+        if len(build_tape(spec)) <= MAX_TAPE_BYTES:
+            return spec
+    raise RuntimeError(f"impossible de générer un épisode '{kind}' sous {MAX_TAPE_BYTES} octets "
+                       f"après {1 + MAX_REDRAWS} tirages")
 
 
 def iter_episodes(seed: int, n: int):
