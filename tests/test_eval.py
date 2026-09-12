@@ -3,9 +3,10 @@ import torch
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
 from relis.train.checkpoint import save_checkpoint
-from relis.data.episodes import Case, generate_case
+from relis.data.episodes import Case, generate_case, iter_cases
 from relis.infer.controller import Budget, Controller, Event
 from relis.eval.harness import judge, load_controller, run_case, summarise
+from relis.eval.autonomy import classify, evaluate, format_report
 
 
 def _ctl():
@@ -95,3 +96,28 @@ def test_judge_absent_unchanged():
     c = generate_case(random.Random(2), "absent")
     assert judge(c, "Je ne trouve pas cette information.") is True
     assert judge(c, "C'est 42.") is False
+
+
+def test_classify_covers_every_case():
+    # Un document utile sauté doit être détecté via `doc_actions`, pas via un simple
+    # compteur : un compteur ne dit pas SI le document nécessaire fait partie des
+    # sautés (voir la décision consignée dans le rapport de la tâche 5).
+    c = generate_case(random.Random(5), "fact_recall")
+    c.stop_index = 3
+    assert classify(c, {"stop_at": 3, "doc_actions": []}) == "exact"
+    assert classify(c, {"stop_at": 1, "doc_actions": []}) == "trop_tot"
+    assert classify(c, {"stop_at": 6, "doc_actions": []}) == "trop_tard"
+    assert classify(c, {"stop_at": None, "doc_actions": []}) == "jamais_stop"
+    d = generate_case(random.Random(6), "doc_lookup")
+    needed_doc = d.passes_needed[0][1]
+    doc_actions = ["read"] * (needed_doc + 1)
+    doc_actions[needed_doc] = "skip"
+    assert classify(d, {"stop_at": -1, "doc_actions": doc_actions}) == "doc_utile_saute"
+
+
+def test_evaluate_returns_shares_that_sum_to_one():
+    res = evaluate(_ctl(), list(iter_cases(11, 6)))
+    assert abs(sum(res["classes"].values()) - 1.0) < 1e-6
+    assert 0.0 <= res["exactitude"] <= 1.0
+    assert res["n"] == 6 and res["octets_lus_moyen"] >= 0
+    assert "exact" in format_report(res)
