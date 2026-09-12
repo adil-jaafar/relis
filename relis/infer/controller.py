@@ -127,7 +127,8 @@ class Controller:
                     self._feed_one(a, MODE_SCAN)
                     if a == C.READ:
                         content = C.sanitize(seg.content)
-                        self._feed(content, MODE_SCAN)
+                        if content:
+                            self._feed(content, MODE_SCAN)
                         cnt["read"] += len(content)
                     yield Event("segment", channel=cname, header=seg.header,
                                 size=len(seg.content), action="read" if a == C.READ else "skip")
@@ -159,11 +160,15 @@ class Controller:
             guard = Utf8Guard()
             lg = self._feed(bytes([C.GEN]), MODE_GEN)
             while True:
-                if cnt["written"] >= bud.max_gen_bytes:
-                    allowed = frozenset({C.END})
+                # Le budget ne force l'arrêt qu'à une frontière de caractère : hors
+                # frontière, le masque UTF-8 reste seul maître, quitte à dépasser le
+                # budget d'au plus trois octets, le temps de terminer le caractère en cours.
+                over_gen = cnt["written"] >= bud.max_gen_bytes
+                if over_gen and guard.at_boundary:
+                    allowed = frozenset({C.END})          # arrêt propre, à une frontière
                 else:
-                    allowed = guard.allowed()
-                    if guard.at_boundary:
+                    allowed = guard.allowed()             # hors frontière : finir le caractère
+                    if guard.at_boundary and not over_gen:
                         extra = {C.END}
                         if cnt["refresh"] < bud.max_refresh:
                             extra |= set(GEN_CODES) - {C.END}
@@ -178,8 +183,13 @@ class Controller:
                     if b == C.NOTE:
                         lg = self._feed_one(b, MODE_GEN)
                         ng = Utf8Guard()
-                        while len(note) < bud.max_note_bytes:
-                            na = ng.allowed() | (NOTE_CODES if ng.at_boundary else frozenset())
+                        while True:
+                            over_note = len(note) >= bud.max_note_bytes
+                            if over_note and ng.at_boundary:
+                                break                      # note complète, on force REFRESH
+                            na = ng.allowed()
+                            if ng.at_boundary and not over_note:
+                                na = na | NOTE_CODES
                             nb = self._decide(lg, na)
                             if nb == C.REFRESH:
                                 break
@@ -210,5 +220,6 @@ class Controller:
             yield from scan()
 
         cnt["seconds"] = round(time.time() - t0, 2)
+        # Rien de disponible à lire : rien à économiser non plus, donc 0.0 (et pas 1.0).
         cnt["saved"] = round(1.0 - cnt["read"] / max(1, available), 3) if available else 0.0
         yield Event("turn_end", text=bytes(answer).decode("utf-8", "replace"), stats=dict(cnt))
