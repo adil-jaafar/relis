@@ -80,7 +80,7 @@ class TerminalRenderer:
                 self._w(self._c("grey",
                                 f"  {s['read']} octets lus · {s['written']} écrits · "
                                 f"{s['refresh']} relecture(s) · {round(s['saved'] * 100)} % "
-                                f"de l'historique économisé · {s['seconds']} s"))
+                                f"du contexte économisé · {s['seconds']} s"))
 
     def run(self, events) -> str:
         for e in events:

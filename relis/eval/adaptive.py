@@ -8,7 +8,7 @@ import argparse
 import random
 
 from relis.data.episodes import FACTS, Case, build_history, case_to_spec
-from .harness import judge, load_controller, run_case
+from .harness import budget_for, judge, load_controller, run_case
 
 
 def _placed_case(rng: random.Random, recent: bool) -> Case:
@@ -24,25 +24,38 @@ def _placed_case(rng: random.Random, recent: bool) -> Case:
     return case
 
 
-def evaluate(ctl, n: int = 40, seed: int = 777) -> dict:
+def evaluate(ctl, n: int = 40, seed: int = 777, max_gen: int | None = None) -> dict:
+    # `max_gen=None` reprend `ctl.budget.max_gen_bytes` (voir `autonomy.evaluate`).
+    max_gen = ctl.budget.max_gen_bytes if max_gen is None else max_gen
     rng = random.Random(seed)
-    out = {}
+    out = {"arrets_budget": 0}
     for nom, recent in (("faciles", True), ("difficiles", False)):
-        lus, bons = 0, 0
+        lus, bons, arrets_budget = 0, 0, 0
         for _ in range(n):
             case = _placed_case(rng, recent)
-            r = run_case(ctl, case)
+            r = run_case(ctl, case, budget=budget_for(case, max_gen))
             lus += r["read"]; bons += int(judge(case, r["answer"]))
+            arrets_budget += int(r["stopped_by_budget"])
         out[nom] = lus // n
         out[f"exactitude_{nom}"] = bons / n
+        out["arrets_budget"] += arrets_budget
+    # `max(1, faciles)` protège la division : quand la population « faciles » lit
+    # zéro octet en moyenne (le fait est tout de suite là, rien à lire pour le
+    # confirmer), le « rapport » dégénère en simple compte brut de `difficiles`
+    # plutôt qu'un vrai ratio difficiles/faciles — un rapport ×N ne veut alors pas
+    # dire « N fois plus » mais « N octets, contre 0 ».
     out["rapport"] = round(out["difficiles"] / max(1, out["faciles"]), 2)
     return out
 
 
 def format_report(res: dict) -> str:
+    n_budget = res["arrets_budget"]
+    budget_note = f"arrêts par budget : {n_budget}"
+    if n_budget:                     # le budget, pas le modèle, a tranché : chiffre suspect
+        budget_note += " (chiffre principal suspect)"
     return (f"faciles {res['faciles']} octets lus (justes {res['exactitude_faciles']:.3f}) · "
             f"difficiles {res['difficiles']} octets lus (justes {res['exactitude_difficiles']:.3f}) · "
-            f"rapport ×{res['rapport']}")
+            f"rapport ×{res['rapport']} · {budget_note}")
 
 
 def main(argv=None):
@@ -62,11 +75,10 @@ def main(argv=None):
     if not (args.repo or args.ckpt):
         ap.error("--repo ou --ckpt est requis")
     import torch
-    from relis.infer.controller import Budget
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    ctl, step = load_controller(args.ckpt or args.repo, device, Budget(max_gen_bytes=args.max_gen))
+    ctl, step = load_controller(args.ckpt or args.repo, device)
     print(f"[adaptatif] checkpoint au pas {step}")
-    print(format_report(evaluate(ctl, args.n, args.seed)))
+    print(format_report(evaluate(ctl, args.n, args.seed, args.max_gen)))
 
 
 if __name__ == "__main__":

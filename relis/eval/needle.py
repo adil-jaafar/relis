@@ -9,7 +9,7 @@ import argparse
 import random
 
 from relis.data.episodes import FACTS, Case, build_history, case_to_spec
-from .harness import judge, load_controller, run_case
+from .harness import budget_for, judge, load_controller, run_case
 
 # Garde-fou de la boucle de croissance : même pour la plus grande taille visée par les
 # évaluations (200 000 octets), on ne construit jamais plus de NEEDLE_MAX_TOURS paires
@@ -38,27 +38,36 @@ def build_case(rng: random.Random, target_bytes: int) -> Case:
     return case
 
 
-def evaluate(ctl, sizes=(1_000, 4_000, 16_000, 64_000, 200_000), n_per_size: int = 20, seed: int = 777):
+def evaluate(ctl, sizes=(1_000, 4_000, 16_000, 64_000, 200_000), n_per_size: int = 20,
+             seed: int = 777, max_gen: int | None = None):
+    # `max_gen=None` reprend `ctl.budget.max_gen_bytes` (voir `autonomy.evaluate`).
+    max_gen = ctl.budget.max_gen_bytes if max_gen is None else max_gen
     rows = []
     for size in sizes:
         rng = random.Random(seed + size)
-        bons, lus, secs = 0, 0, 0.0
+        bons, lus, secs, arrets_budget = 0, 0, 0.0, 0
         for _ in range(n_per_size):
             case = build_case(rng, size)
-            r = run_case(ctl, case)
+            r = run_case(ctl, case, budget=budget_for(case, max_gen))
             bons += int(judge(case, r["answer"]))
             lus += r["read"]; secs += r["seconds"]
+            arrets_budget += int(r["stopped_by_budget"])
         rows.append({"taille": size, "exactitude": bons / n_per_size,
                      "octets_lus_moyen": lus // n_per_size,
-                     "secondes_moyennes": round(secs / n_per_size, 2)})
+                     "secondes_moyennes": round(secs / n_per_size, 2),
+                     "arrets_budget": arrets_budget})
     return rows
 
 
 def format_table(rows) -> str:
-    out = [f"{'taille':>9} {'exactitude':>11} {'octets lus':>11} {'secondes':>9}"]
+    out = [f"{'taille':>9} {'exactitude':>11} {'octets lus':>11} {'secondes':>9}  arrêts par budget"]
     for r in rows:
+        nb = r["arrets_budget"]
+        note = f"arrêts par budget : {nb}"
+        if nb:                      # le budget, pas le modèle, a tranché : ligne suspecte
+            note += " (chiffre suspect)"
         out.append(f"{r['taille']:>9} {r['exactitude']:>11.3f} "
-                   f"{r['octets_lus_moyen']:>11} {r['secondes_moyennes']:>9}")
+                   f"{r['octets_lus_moyen']:>11} {r['secondes_moyennes']:>9}  {note}")
     return "\n".join(out)
 
 
@@ -80,11 +89,11 @@ def main(argv=None):
     if not (args.repo or args.ckpt):
         ap.error("--repo ou --ckpt est requis")
     import torch
-    from relis.infer.controller import Budget
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    ctl, step = load_controller(args.ckpt or args.repo, device, Budget(max_gen_bytes=args.max_gen))
+    ctl, step = load_controller(args.ckpt or args.repo, device)
     print(f"[aiguille] checkpoint au pas {step}")
-    print(format_table(evaluate(ctl, tuple(int(s) for s in args.sizes.split(",")), args.n, args.seed)))
+    print(format_table(evaluate(ctl, tuple(int(s) for s in args.sizes.split(",")),
+                                args.n, args.seed, args.max_gen)))
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@ import torch
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
 from relis.train.checkpoint import save_checkpoint
+from relis.tape.headers import format_header
+from relis.tape.tape import Segment
 from relis.data.episodes import Case, generate_case, iter_cases
 from relis.infer.controller import Budget, Controller, Event
-from relis.eval.harness import judge, load_controller, run_case, summarise
+from relis.eval.harness import budget_for, judge, load_controller, run_case, summarise
 from relis.eval.autonomy import classify, evaluate, format_report
 from relis.eval.needle import build_case, evaluate as needle_eval, format_table
 from relis.eval.adaptive import evaluate as adaptive_eval
@@ -136,15 +138,18 @@ def _doc_case(needed_doc):
 def test_classify_doc_never_reached():
     # Le balayage s'est arrêté DANS les documents (stop_at == -1) mais avant
     # d'atteindre l'index utile : `doc_actions` est trop court pour l'index 2.
+    # Arrêté trop tôt (pas encore lu ce qu'il fallait), pas « sauté » : le canal
+    # documents n'a même pas été ouvert jusqu'au bon document (spec §9, F3).
     c = _doc_case(2)
-    assert classify(c, {"stop_at": -1, "doc_actions": ["read"]}) == "doc_utile_saute"
+    assert classify(c, {"stop_at": -1, "doc_actions": ["read"]}) == "trop_tot"
 
 
 def test_classify_doc_stopped_in_history():
     # Le balayage s'est arrêté dans l'HISTORIQUE (stop_at != -1) : les documents
-    # n'ont jamais été ouverts, donc le document utile n'a jamais été lu.
+    # n'ont jamais été ouverts, donc le document utile n'a jamais été lu — trop tôt,
+    # pas « sauté » (le canal documents n'a même pas été ouvert, spec §9, F3).
     c = _doc_case(2)
-    assert classify(c, {"stop_at": 1, "doc_actions": []}) == "doc_utile_saute"
+    assert classify(c, {"stop_at": 1, "doc_actions": []}) == "trop_tot"
 
 
 def test_classify_doc_exact_and_too_late():
@@ -161,6 +166,27 @@ def test_classify_doc_needed_but_skipped():
     assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "skip", "read"]}) == "doc_utile_saute"
 
 
+def _doc_seg(name="d.txt"):
+    return Segment(header=format_header({"type": "doc", "name": name}), content=b"x")
+
+
+def test_classify_absent_with_docs():
+    # Cas « absent » (F2) : aucun document nécessaire (`needed_doc is None`), mais
+    # des documents existent quand même — l'oracle les visite TOUS avant de
+    # s'arrêter au dernier (`stop_index == -1`). Un arrêt dans l'historique n'a
+    # rien vérifié : trop tôt, pas « trop tard » (`stop_at >= 0 > -1` ne doit pas
+    # suffire). Un arrêt au premier document sur trois n'a pas non plus tout
+    # vérifié : trop tôt aussi, pas « exact » (`stop_at == -1 == stop_index` ne
+    # doit pas suffire sans avoir visité les trois).
+    c = Case(kind="absent", query=b"q", history=[], docs=[_doc_seg("a"), _doc_seg("b"), _doc_seg("c")],
+             doc_relevant=[False, False, False], passes_needed=[(set(), None)],
+             answer_parts=[b"absent"], notes=[], answer_value="")
+    c.stop_index = -1
+    assert classify(c, {"stop_at": 1, "doc_actions": []}) == "trop_tot"
+    assert classify(c, {"stop_at": -1, "doc_actions": ["skip"]}) == "trop_tot"
+    assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "skip", "skip"]}) == "exact"
+
+
 def test_needle_case_reaches_requested_size_and_keeps_the_fact():
     c = build_case(random.Random(1), 6000)
     total = sum(len(s.content) for s in c.history)
@@ -175,6 +201,75 @@ def test_needle_evaluate_returns_one_row_per_size():
     assert [r["taille"] for r in rows] == [600, 1200]
     assert all(0.0 <= r["exactitude"] <= 1.0 for r in rows)
     assert "taille" in format_table(rows)
+
+
+def test_needle_report_mentions_budget_stops():
+    rows = needle_eval(_ctl(), sizes=(600,), n_per_size=2, seed=5)
+    assert "budget" in format_table(rows)
+
+
+def test_budget_for_covers_the_whole_case():
+    # Un cas à 3 000 segments d'historique (bien au-delà du plafond d'entraînement
+    # `Budget.max_segments == 2000`) doit recevoir un budget qui les couvre tous,
+    # sinon le contrôleur est forcé SKIP puis STOP avant même d'avoir pu atteindre
+    # le fait (spec §9, F1).
+    hist = [Segment(header=format_header({"role": "user", "i": i}), content=b"x" * 20)
+            for i in range(3_000)]
+    case = Case(kind="needle", query=b"q", history=hist, docs=[], doc_relevant=[],
+                passes_needed=[({1}, None)], answer_parts=[b"y"], notes=[], answer_value="y")
+    b = budget_for(case, max_gen=64)
+    assert b.max_segments > 3_000
+    assert b.max_read_bytes >= sum(len(s.content) for s in hist)
+    assert b.max_gen_bytes == 64
+
+
+def test_summarise_reports_budget_stop():
+    budget_stop = [Event("turn_start", text="q"), Event("scan_end", text="budget")]
+    normal_stop = [Event("turn_start", text="q"), Event("scan_end", text="stop")]
+    assert summarise(budget_stop)["stopped_by_budget"] is True
+    assert summarise(normal_stop)["stopped_by_budget"] is False
+
+
+class _FakeCtl:
+    """Contrôleur factice pour tester `run_case` sans modèle : seul `.budget`
+    (lu/écrit par `run_case`) et `.turn(query, history, docs)` sont utilisés."""
+
+    def __init__(self, events):
+        self.budget = Budget()
+        self._events = events
+
+    def turn(self, query, history, docs):
+        return iter(self._events)
+
+
+def test_saved_uses_the_first_pass_only():
+    # Première passe : 100 octets lus sur 400 disponibles. REFRESH. Seconde passe :
+    # relit les mêmes 100 octets (coût total cumulé = 200). `saved` doit rester basé
+    # sur la première passe seule (100/400 -> 0.75), jamais sur le total, qui donnerait
+    # une économie négative pour un modèle qui n'a pourtant rien lu de plus au fond
+    # (spec §9, F4).
+    events = [
+        Event("turn_start", text="q"),
+        Event("channel", channel="history", size=1),
+        Event("segment", channel="history", header="h0", size=100, action="read"),
+        Event("decision", channel="history", text="STOP"),
+        Event("scan_end", text="stop"),
+        Event("gen_byte", byte=65),
+        Event("note", text=""),
+        Event("refresh", index=1),
+        Event("channel", channel="history", size=1),
+        Event("segment", channel="history", header="h0b", size=100, action="read"),
+        Event("decision", channel="history", text="STOP"),
+        Event("scan_end", text="stop"),
+        Event("end"),
+        Event("turn_end", text="A", stats={"read": 200, "written": 1, "refresh": 1,
+                                           "saved": -1.0, "seconds": 0.01, "available": 400}),
+    ]
+    case = Case(kind="fact_recall", query=b"q", history=[], docs=[], doc_relevant=[],
+                passes_needed=[(set(), None)], answer_parts=[b"a"], notes=[], answer_value="a")
+    r = run_case(_FakeCtl(events), case)
+    assert r["read"] == 200                 # coût total, cumulé sur les deux passes
+    assert r["saved"] == 0.75                # mais l'économie ne regarde que la 1re passe
 
 
 def test_adaptive_returns_two_populations_and_a_ratio():
