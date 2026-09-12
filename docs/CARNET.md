@@ -11,7 +11,7 @@ retenu.**
 | Pré-entraînement | **1,009 bit par octet** en validation, terminé |
 | Entraînement ruban | en cours, 1 500 pas, ≈ 23 h sur 2×T4 |
 | Modèle | 159,8 M paramètres, entraîné de zéro |
-| Dépôt | 139 tests, 50 commits |
+| Dépôt | 192 tests, 64 commits |
 | Spécification | [`docs/superpowers/specs/2026-09-06-relis-design.md`](superpowers/specs/2026-09-06-relis-design.md) |
 
 ---
@@ -219,16 +219,40 @@ les données et deux sessions.
 française » qui bloquait tout après le pré-entraînement. Le code dérive davantage. Le rappel à 10 %
 du gradient tient la langue sans la figer.
 
-### ⬜ Plan 3 — Le contrôleur et la démonstration
+### ✅ Plan 3 — Le contrôleur et la démonstration
 
-La boucle d'inférence qui pilote réellement le modèle, et tout ce qui rend le mécanisme visible. C'est
-le plan qui produit le « waw », et il ne consomme aucun quota GPU, donc il peut s'écrire pendant que
-l'entraînement tourne.
+La boucle d'inférence qui pilote réellement le modèle, et tout ce qui rend le mécanisme visible.
+Six tâches, écrites sans consommer de quota GPU pendant que l'entraînement ruban tournait sur
+Kaggle.
 
-- Contrôleur : encoder, balayer, décider, générer, relire ; décodage contraint en UTF-8
-- Extraits et RECALL : copier exactement les noms, nombres et lignes lus dans les documents
-- Sonde qui traduit le Buffer en français, évaluations aiguille sur des historiques de 1 ko à 200 ko
-- Interface de démonstration : segments lus et sautés, position du STOP, raison des relectures
+- Décodage contraint en UTF-8, cas limites câblés par restriction du masque plutôt qu'appris
+- Contrôleur : encoder, balayer, décider, générer, relire (REFRESH) ; budgets pour rendre la main
+  même sur un modèle qui n'arrête jamais
+- Terminal de démonstration : documents joints, conversation persistante, segments lus et sautés
+  affichés à l'écran, position du STOP, raison d'une relecture
+- Harnais d'évaluation en autonomie contre l'oracle (`relis.eval.autonomy`) : le contrôleur décide
+  seul, plus aucune décision n'est forcée — la seule mesure qui dit si le mécanisme survit à la
+  composition de ses propres erreurs
+- Évaluation aiguille (`relis.eval.needle`) : exactitude et octets lus en fonction de la longueur
+  de l'historique (1 ko à 200 ko), pour vérifier que la Mémoire à taille constante ne décroche pas
+  quand l'historique dépasse largement ce qui a été vu à l'entraînement
+- Évaluation du calcul adaptatif (`relis.eval.adaptive`) : octets lus sur des cas faciles contre
+  des cas difficiles, pour vérifier chiffres à l'appui que la lecture suit la difficulté plutôt
+  que de tout lire systématiquement
+- Mode d'emploi Colab (`notebooks/COLAB_EVAL.md`) pour exécuter les trois évaluations et une
+  conversation d'essai sur un checkpoint réel
+
+**Chiffres réels : à venir.** Le code et les 15 tests des évaluations sont en place et passent sur
+un modèle minuscule non entraîné (aucune exception, chiffres sans signification) ; les résultats
+sur le checkpoint Kaggle réel (`jaafar2022/relis-v1-tape`, encore en entraînement — voir la section
+précédente) seront reportés ici une fois les trois commandes exécutées via
+`notebooks/COLAB_EVAL.md`. Aucun chiffre n'est inventé en attendant.
+
+Extraits et RECALL (copier exactement les noms, nombres et lignes lus dans les documents) et la
+sonde qui traduit le Buffer en français sont retirés du périmètre de ce plan : les deux exigent de
+régénérer les rubans d'entraînement et de réentraîner (RECALL) ou dépendent de l'étiquetage par un
+modèle professeur (la sonde). Ils sont renvoyés au plan 2b, avec l'application Gradio qui suivra
+la CLI.
 
 ### ⬜ Plan 2b — Données réelles, échelle et témoin
 
@@ -239,6 +263,10 @@ scientifique qui rend la comparaison honnête.
 - Écart d'échelle : documents longs, historiques profonds, segments d'historique à sauter
 - Baseline Transformer sur octets, même taille et mêmes données. Elle coûte autant de GPU que RELIS,
   donc elle passe en dernier
+- Extraits et RECALL (copier exactement noms, nombres et lignes lus), reportés du plan 3 : exigent
+  de régénérer les rubans d'entraînement
+- Sonde qui traduit le Buffer en français, reportée du plan 3 : dépend de l'étiquetage par le
+  modèle professeur ci-dessus
 
 ### ⬜ Plus tard — V2 et sujets de thèse
 
@@ -259,5 +287,6 @@ répondre » gagne sur l'attention globale.
 | Plan 1 | [`docs/superpowers/plans/2026-09-06-relis-plan1-coeur.md`](superpowers/plans/2026-09-06-relis-plan1-coeur.md) |
 | Plan 2a | [`docs/superpowers/plans/2026-09-07-relis-plan2a-rubans.md`](superpowers/plans/2026-09-07-relis-plan2a-rubans.md) |
 | Procédure Kaggle et Colab | [`notebooks/KAGGLE.md`](../notebooks/KAGGLE.md) |
+| Évaluer un checkpoint sur Colab | [`notebooks/COLAB_EVAL.md`](../notebooks/COLAB_EVAL.md) |
 | Échantillonner un checkpoint | `python -m relis.infer.sample --repo <dépôt> --prompt "…"` |
 | Construire des rubans | `python -m relis.data.pack --out shards/tapes --episodes 100000 …` |

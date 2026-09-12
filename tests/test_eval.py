@@ -7,6 +7,8 @@ from relis.data.episodes import Case, generate_case, iter_cases
 from relis.infer.controller import Budget, Controller, Event
 from relis.eval.harness import judge, load_controller, run_case, summarise
 from relis.eval.autonomy import classify, evaluate, format_report
+from relis.eval.needle import build_case, evaluate as needle_eval, format_table
+from relis.eval.adaptive import evaluate as adaptive_eval
 
 
 def _ctl():
@@ -157,3 +159,25 @@ def test_classify_doc_exact_and_too_late():
 def test_classify_doc_needed_but_skipped():
     c = _doc_case(1)
     assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "skip", "read"]}) == "doc_utile_saute"
+
+
+def test_needle_case_reaches_requested_size_and_keeps_the_fact():
+    c = build_case(random.Random(1), 6000)
+    total = sum(len(s.content) for s in c.history)
+    assert 4000 <= total <= 12000
+    joined = b" ".join(s.content for s in c.history).decode("utf-8", "replace")
+    assert c.answer_value in joined
+    assert 0 <= c.stop_index < len(c.history)
+
+
+def test_needle_evaluate_returns_one_row_per_size():
+    rows = needle_eval(_ctl(), sizes=(600, 1200), n_per_size=2, seed=5)
+    assert [r["taille"] for r in rows] == [600, 1200]
+    assert all(0.0 <= r["exactitude"] <= 1.0 for r in rows)
+    assert "taille" in format_table(rows)
+
+
+def test_adaptive_returns_two_populations_and_a_ratio():
+    res = adaptive_eval(_ctl(), n=3, seed=5)
+    assert res["faciles"] >= 0 and res["difficiles"] >= 0
+    assert res["rapport"] > 0
