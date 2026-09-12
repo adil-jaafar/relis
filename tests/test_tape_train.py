@@ -6,7 +6,7 @@ from relis.model.relis import RelisModel
 from relis.tape import codes as C
 from relis.data.pack import build_shards, TapeWindows
 from relis.data.shards import ShardWriter
-from relis.train.loop import TrainConfig, train, _loss, load_weights, fetch_weights_path
+from relis.train.loop import TrainConfig, train, _loss, load_weights, fetch_weights_path, _make_optimizer
 from relis.train.metrics import decision_accuracy
 from relis.train.checkpoint import save_checkpoint
 
@@ -197,3 +197,114 @@ def test_grad_accum_matches_single_large_batch(tmp_path, tapes):
 
     for pa, pb in zip(m_a.parameters(), m_b.parameters()):
         assert torch.allclose(pa, pb, atol=1e-6)
+
+
+class _Clock:
+    """Horloge factice : chaque appel à time() avance de `step` secondes (cf. test_loop.py)."""
+
+    def __init__(self, step: float):
+        self.step = step
+        self.now = 0.0
+
+    def time(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def _mean_abs_diff(params_a, params_b) -> torch.Tensor:
+    return torch.stack([(a - b).abs().mean() for a, b in zip(params_a, params_b)]).mean()
+
+
+def test_resume_ignores_init_from(tmp_path, tapes):
+    """Le test le plus important du lot : la session 2 doit reprendre son propre
+    checkpoint (B) et ne jamais appliquer init_from (A), même si init_from pointe
+    vers un dépôt de pré-entraînement valide."""
+    tr, va = tapes
+    cfg = RelisConfig.tiny()
+
+    model_a = RelisModel(cfg)                      # poids « pré-entraînement »
+    model_b = RelisModel(cfg)                       # poids « session 1 »
+    with torch.no_grad():
+        for p in model_b.parameters():
+            p.add_(1.0)                             # garantit qu'aucun paramètre ne coïncide avec A
+
+    dir_a = tmp_path / "dir_a"
+    save_checkpoint(str(dir_a), model_a, None, None, step=2500, cfg_dict=cfg.to_dict(), extra={})
+
+    run_dir = tmp_path / "run"
+    # même construction de groupes que train()/_make_optimizer, sinon load_state_dict
+    # échoue au nombre de groupes de paramètres lors de la reprise.
+    opt_b = _make_optimizer(model_b, _tcfg())
+    batch = tr.sample(1, torch.Generator().manual_seed(0))
+    loss = _loss(model_b, batch, "cpu", amp=False)
+    loss.backward()
+    opt_b.step()                                    # B a fait un pas : son état d'optimiseur compte
+    save_checkpoint(str(run_dir), model_b, opt_b, None, step=3, cfg_dict=cfg.to_dict(), extra={})
+
+    model_c = RelisModel(cfg)                       # troisième modèle tiny neuf
+    snap = []
+    out = train(model_c, _tcfg(max_steps=4, init_from=str(dir_a / "last.pt")), tr, va,
+                str(run_dir), device="cpu", resume=True,
+                on_step=lambda s, l: snap.append([p.detach().clone() for p in model_c.parameters()]))
+
+    assert out["step"] == 4                          # repris à 3, un seul pas fait
+    d_b = _mean_abs_diff(snap[0], list(model_b.parameters()))
+    d_a = _mean_abs_diff(snap[0], list(model_a.parameters()))
+    assert d_b < d_a / 10                             # avant le pas, les poids venaient de B, pas de A
+
+
+def test_resume_applies_init_from_when_no_checkpoint(tmp_path, tapes):
+    """Symétrique du précédent : run_dir vide -> init_from s'applique bien."""
+    tr, va = tapes
+    cfg = RelisConfig.tiny()
+
+    model_a = RelisModel(cfg)
+    dir_a = tmp_path / "dir_a"
+    save_checkpoint(str(dir_a), model_a, None, None, step=2500, cfg_dict=cfg.to_dict(), extra={})
+
+    model_c = RelisModel(cfg)
+    c_init = [p.detach().clone() for p in model_c.parameters()]   # poids aléatoires avant init_from
+    snap = []
+    run_dir = tmp_path / "run_empty"
+    out = train(model_c, _tcfg(max_steps=1, init_from=str(dir_a / "last.pt")), tr, va,
+                str(run_dir), device="cpu", resume=True,
+                on_step=lambda s, l: snap.append([p.detach().clone() for p in model_c.parameters()]))
+
+    assert out["step"] == 1
+    d_a = _mean_abs_diff(snap[0], list(model_a.parameters()))
+    d_init = _mean_abs_diff(snap[0], c_init)
+    assert d_a < d_init / 10
+
+
+def test_tape_resume_continues_with_masks(tmp_path, tapes):
+    """Reprise sur des données ruban (masques actifs), pas seulement sur des tuples."""
+    tr, va = tapes
+    run_dir = tmp_path / "run"
+    m1 = RelisModel(RelisConfig.tiny())
+    train(m1, _tcfg(max_steps=2), tr, va, str(run_dir), device="cpu", resume=False)
+
+    m2 = RelisModel(RelisConfig.tiny())
+    seen = []
+    out = train(m2, _tcfg(max_steps=4), tr, va, str(run_dir), device="cpu", resume=True,
+                on_step=lambda s, l: seen.append(s))
+    assert seen == [3, 4]
+    assert out["step"] == 4
+
+
+def test_budget_exit_pushes_to_hub(tmp_path, tapes, monkeypatch):
+    """La sortie par budget de temps doit pousser sur le Hub, sinon la session 1 est perdue."""
+    import relis.train.loop as loop_mod
+    tr, va = tapes
+
+    pushes = []
+    monkeypatch.setattr(loop_mod, "push_to_hub", lambda d, r: pushes.append(r))
+    monkeypatch.setattr(loop_mod, "pull_from_hub", lambda d, r: False)
+    monkeypatch.setattr(loop_mod, "time", _Clock(60.0))
+
+    m = RelisModel(RelisConfig.tiny())
+    run_dir = tmp_path / "run"
+    out = train(m, _tcfg(max_steps=100, time_budget_hours=0.5, hub_repo="x/y"), tr, va,
+                str(run_dir), device="cpu", resume=False)
+    assert out["stopped_by_budget"] is True
+    assert (run_dir / "last.pt").exists()
+    assert len(pushes) == 1 and pushes[0] == "x/y"
