@@ -11,10 +11,38 @@ Les plages de remplissage sont choisies pour que ce cas soit rarissime — le
 garde-fou est une ceinture de sécurité, pas le mécanisme principal.
 """
 import random
+from dataclasses import dataclass, field
 
 from relis.tape import codes as C
 from relis.tape.headers import format_header
 from relis.tape.tape import Segment, Pass, TapeSpec, build_tape
+
+
+@dataclass
+class Case:
+    """Matière première d'un épisode : l'historique et les documents **complets**,
+    plus ce que l'oracle sait. `case_to_spec` en tire le ruban tronqué au STOP ;
+    l'évaluation en autonomie, elle, donne l'historique entier au contrôleur."""
+    kind: str
+    query: bytes
+    history: list                  # Segment, récent → ancien, complet
+    docs: list                     # Segment, complet
+    doc_relevant: list
+    passes_needed: list            # [(needed_hist:set[int], needed_doc:int|None), ...]
+    answer_parts: list
+    notes: list
+    answer_value: str = ""
+    stop_index: int = -1
+
+
+def case_to_spec(case: Case) -> TapeSpec:
+    passes = [oracle_pass(case.history, nh, case.docs, nd, case.doc_relevant)
+              for nh, nd in case.passes_needed]
+    first = passes[0]
+    case.stop_index = len(first.history) - 1 if first.docs is None else -1
+    return TapeSpec(query=case.query, passes=passes,
+                    answer_parts=case.answer_parts, notes=case.notes)
+
 
 KINDS = ("fact_recall", "variable_tracking", "what_did_i_say", "doc_lookup", "absent", "two_facts", "long_answer")
 KIND_WEIGHTS = (22, 12, 14, 22, 8, 12, 10)
@@ -106,6 +134,9 @@ def _history(rng, n_pairs, injections):
     return turns[::-1]
 
 
+build_history = _history          # alias public : les tâches suivantes n'importent pas de nom privé
+
+
 def _filler_doc(rng, i):
     name = f"{rng.choice(FILLER_DOC_NAMES)}_{i}.txt"
     body = " ".join(_fill(rng, rng.choice(FILLERS_USER)) for _ in range(rng.randint(2, 25)))
@@ -149,16 +180,17 @@ def oracle_pass(history_segments, needed_hist, docs, needed_doc, doc_relevant) -
     return Pass(history=hist, docs=out_docs)
 
 
-def _fact_recall(rng):
+def _fact_recall(rng) -> Case:
     f = rng.choice(FACTS); v = f[4](rng)
     n = rng.randint(3, 14); at = rng.randint(0, n - 1)
     hist = _history(rng, n, {at: f[0].format(v=v)})
-    idx = 2 * (n - 1 - at) + 1                        # position dans l'ordre récent -> ancien
-    p = oracle_pass(hist, {idx}, [], None, [])
-    return TapeSpec(query=f[1].encode(), passes=[p], answer_parts=[f[2].format(v=v).encode()], notes=[])
+    idx = 2 * (n - 1 - at) + 1
+    return Case(kind="fact_recall", query=f[1].encode("utf-8"), history=hist, docs=[],
+                doc_relevant=[], passes_needed=[({idx}, None)],
+                answer_parts=[f[2].format(v=v).encode()], notes=[], answer_value=str(v))
 
 
-def _variable_tracking(rng):
+def _variable_tracking(rng) -> Case:
     n = rng.randint(3, 10); x = rng.randint(1, 9); ops = {}
     at = sorted(rng.sample(range(n), k=min(n, rng.randint(1, 3))))
     val = x
@@ -168,18 +200,19 @@ def _variable_tracking(rng):
         ops[a] = f"x augmente de {d}."
     hist = _history(rng, n, ops)
     needed = {2 * (n - 1 - a) + 1 for a in at}
-    p = oracle_pass(hist, needed, [], None, [])
-    return TapeSpec(query=b"Combien vaut x maintenant ?", passes=[p],
-                    answer_parts=[f"x vaut {val}.".encode()], notes=[])
+    return Case(kind="variable_tracking", query=b"Combien vaut x maintenant ?", history=hist, docs=[],
+                doc_relevant=[], passes_needed=[(needed, None)],
+                answer_parts=[f"x vaut {val}.".encode()], notes=[], answer_value=str(val))
 
 
-def _what_did_i_say(rng):
+def _what_did_i_say(rng) -> Case:
     sujet = rng.choice(SUJETS); v = rng.choice(["c'est urgent", "c'est reporté", "c'est terminé", "il faut un budget"])
     n = rng.randint(3, 12); at = rng.randint(0, n - 1)
     hist = _history(rng, n, {at: f"À propos {_de(sujet)} : {v}."})
-    p = oracle_pass(hist, {2 * (n - 1 - at) + 1}, [], None, [])
-    return TapeSpec(query=f"Qu'ai-je dit sur {sujet} ?".encode(), passes=[p],
-                    answer_parts=[f"Vous avez dit : « {v} ».".encode()], notes=[])
+    idx = 2 * (n - 1 - at) + 1
+    return Case(kind="what_did_i_say", query=f"Qu'ai-je dit sur {sujet} ?".encode(), history=hist, docs=[],
+                doc_relevant=[], passes_needed=[({idx}, None)],
+                answer_parts=[f"Vous avez dit : « {v} ».".encode()], notes=[], answer_value=v)
 
 
 def _docs_for(rng, topic, sentence, n_docs, noise):
@@ -207,45 +240,45 @@ def _docs_for(rng, topic, sentence, n_docs, noise):
     return docs, relevant, target
 
 
-def _doc_lookup(rng):
+def _doc_lookup(rng) -> Case:
     topic, tpl, q, a, gen = rng.choice(DOC_TOPICS); v = gen(rng)
     hist = _history(rng, rng.randint(1, 4), {})
     docs, relevant, target = _docs_for(rng, topic, tpl.format(v=v), rng.randint(1, 8), noise=True)
-    p = oracle_pass(hist, set(), docs, target, relevant)
-    return TapeSpec(query=q.encode(), passes=[p], answer_parts=[a.format(v=v).encode()], notes=[])
+    return Case(kind="doc_lookup", query=q.encode(), history=hist, docs=docs,
+                doc_relevant=relevant, passes_needed=[(set(), target)],
+                answer_parts=[a.format(v=v).encode()], notes=[], answer_value=str(v))
 
 
-def _absent(rng):
+def _absent(rng) -> Case:
     topic, tpl, q, a, gen = rng.choice(DOC_TOPICS)
     hist = _history(rng, rng.randint(1, 5), {})
     n_docs = rng.randint(0, 6)
     docs = [_filler_doc(rng, j) for j in range(n_docs)]
-    p = oracle_pass(hist, set(), docs, None, [False] * n_docs)
-    return TapeSpec(query=q.encode(), passes=[p],
-                    answer_parts=[b"Je ne trouve pas cette information dans notre \xc3\xa9change ni dans les documents."],
-                    notes=[])
+    return Case(kind="absent", query=q.encode(), history=hist, docs=docs,
+                doc_relevant=[False] * n_docs, passes_needed=[(set(), None)],
+                answer_parts=[b"Je ne trouve pas cette information dans notre \xc3\xa9change ni dans les documents."],
+                notes=[], answer_value="")
 
 
-def _two_facts(rng):
+def _two_facts(rng) -> Case:
     fa, fb = rng.sample(FACTS, 2); va, vb = fa[4](rng), fb[4](rng)
     n = rng.randint(4, 14)
     at_a, at_b = sorted(rng.sample(range(n), 2), reverse=True)     # A plus récent que B
     hist = _history(rng, n, {at_a: fa[0].format(v=va), at_b: fb[0].format(v=vb)})
     ia, ib = 2 * (n - 1 - at_a) + 1, 2 * (n - 1 - at_b) + 1
-    p1 = oracle_pass(hist, {ia}, [], None, [])
-    p2 = oracle_pass(hist, {ia, ib}, [], None, [])
     q = f"{fa[1][:-2]} et {fb[3]} ?".encode()
     part1 = fa[2].format(v=va).encode()
     part2 = (" " + fb[2].format(v=vb)).encode()
-    return TapeSpec(query=q, passes=[p1, p2], answer_parts=[part1, part2],
-                    notes=[f"il manque {fb[3]}".encode()])
+    return Case(kind="two_facts", query=q, history=hist, docs=[], doc_relevant=[],
+                passes_needed=[({ia}, None), ({ia, ib}, None)], answer_parts=[part1, part2],
+                notes=[f"il manque {fb[3]}".encode()], answer_value=str(vb))
 
 
-def _long_answer(rng):
+def _long_answer(rng) -> Case:
     f = rng.choice(FACTS); v = f[4](rng)
     n = rng.randint(2, 8); at = rng.randint(0, n - 1)
     hist = _history(rng, n, {at: f[0].format(v=v)})
-    p = oracle_pass(hist, {2 * (n - 1 - at) + 1}, [], None, [])
+    needed = {2 * (n - 1 - at) + 1}
     prefix = f[2].format(v=v) + " Voici le détail :\n"
     items = [f"{i + 1}. Point {i + 1} concernant {rng.choice(SUJETS)} : {rng.choice(FILLERS_ASSISTANT).format(sujet=rng.choice(SUJETS))}"
              for i in range(rng.randint(16, 24))]
@@ -258,35 +291,38 @@ def _long_answer(rng):
     answer = (prefix + "\n".join(items)).encode("utf-8")
     L = rng.randint(256, min(1024, len(answer) // 2))
     parts = [answer[i:i + L] for i in range(0, len(answer), L)]
-    # `passes = [p] * len(parts)` alias intentionnellement le même objet Pass pour chaque
-    # passe : toutes relisent exactement le même historique (seul le préfixe PART/NOTE de
-    # la requête change entre les passes, dans build_tape) et Pass n'est jamais modifié en
-    # place — l'aliasing est donc sûr et évite de reconstruire un Pass identique n fois.
-    passes = [p] * len(parts)
     notes = [b"r\xc3\xa9ponse longue, suite"] * (len(parts) - 1)
-    return TapeSpec(query=(f[1] + " Donne-moi tous les détails.").encode("utf-8"), passes=passes,
-                    answer_parts=parts, notes=notes)
+    return Case(kind="long_answer", query=(f[1] + " Donne-moi tous les détails.").encode("utf-8"),
+                history=hist, docs=[], doc_relevant=[], passes_needed=[(needed, None)] * len(parts),
+                answer_parts=parts, notes=notes, answer_value=str(v))
 
 
 _GEN = {"fact_recall": _fact_recall, "variable_tracking": _variable_tracking, "what_did_i_say": _what_did_i_say,
         "doc_lookup": _doc_lookup, "absent": _absent, "two_facts": _two_facts, "long_answer": _long_answer}
 
 
-def generate_episode(rng: random.Random, kind: str | None = None) -> TapeSpec:
+def generate_case(rng: random.Random, kind: str | None = None) -> Case:
     if kind is None:
         kind = rng.choices(KINDS, weights=KIND_WEIGHTS, k=1)[0]
-    spec = _GEN[kind](rng)
-    if len(build_tape(spec)) <= MAX_TAPE_BYTES:
-        return spec
-    for _ in range(MAX_REDRAWS):                    # garde-fou dur : redemande un tirage
-        spec = _GEN[kind](rng)
+    for _ in range(MAX_REDRAWS + 1):
+        case = _GEN[kind](rng)
+        spec = case_to_spec(case)
         if len(build_tape(spec)) <= MAX_TAPE_BYTES:
-            return spec
-    raise RuntimeError(f"impossible de générer un épisode '{kind}' sous {MAX_TAPE_BYTES} octets "
-                       f"après {1 + MAX_REDRAWS} tirages")
+            return case
+    raise RuntimeError(f"épisode « {kind} » toujours au-dessus de {MAX_TAPE_BYTES} octets")
+
+
+def generate_episode(rng: random.Random, kind: str | None = None) -> TapeSpec:
+    return case_to_spec(generate_case(rng, kind))
+
+
+def iter_cases(seed: int, n: int):
+    rng = random.Random(seed)
+    for _ in range(n):
+        yield generate_case(rng)
 
 
 def iter_episodes(seed: int, n: int):
     rng = random.Random(seed)
     for _ in range(n):
-        yield generate_episode(rng)
+        yield case_to_spec(generate_case(rng))
