@@ -153,6 +153,39 @@ def test_generation_budget_never_truncates_a_character():
     assert raw.endswith(bytes([0xE2, 0x82, 0xAC]))
 
 
+def test_bare_refresh_reencodes_with_both_markers():
+    """`GEN_CODES` permet REFRESH directement, sans passer par NOTE (note vide).
+    Le second encodage (après REFRESH) doit quand même TOUJOURS émettre PART puis
+    NOTE, même vides : c'est la seule séquence vue à l'entraînement pour une passe
+    au-delà de la première (spec §9, F5). Avant le correctif, `encode` omettait les
+    marqueurs pour une charge vide, donnant `ENC ... SCAN` sans PART ni NOTE."""
+    ctl = _ctl(max_refresh=1, max_gen_bytes=40)
+    real = ctl._decide
+
+    def bare_refresh_first(logits, allowed):
+        if C.REFRESH in allowed:
+            return C.REFRESH
+        return real(logits, allowed)
+
+    ctl._decide = bare_refresh_first
+    fed = []
+    real_feed = ctl._feed
+
+    def spy(data, mode):
+        fed.append(bytes(data))
+        return real_feed(data, mode)
+
+    ctl._feed = spy
+    list(ctl.turn(b"q", history=[_seg("user", "a", 0)]))
+
+    starts = [chunk[0] for chunk in fed if chunk]
+    enc_positions = [i for i, b in enumerate(starts) if b == C.ENC]
+    assert len(enc_positions) >= 2          # encodage initial + ré-encodage après REFRESH
+    tail = starts[enc_positions[1]:]        # tout ce qui suit le second ENC
+    assert C.PART in tail and C.NOTE in tail
+    assert tail.index(C.PART) < tail.index(C.NOTE)
+
+
 def test_note_budget_never_truncates_a_character():
     """Budget de note épuisé en plein milieu de « € » : la note doit se terminer sur
     une frontière de caractère avant que REFRESH ne soit forcé."""

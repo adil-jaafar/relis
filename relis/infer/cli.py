@@ -46,9 +46,16 @@ def load_docs(paths) -> list:
 
 def history_segments(turns) -> list:
     """Tours passés, du plus récent au plus ancien."""
-    return [Segment(header=format_header({"role": t["role"], "t": t.get("t", "")}),
-                    content=t["text"].encode("utf-8"))
-            for t in reversed(turns)]
+    segs = []
+    for t in reversed(turns):
+        fields = {"role": t["role"]}
+        if t.get("t"):
+            # Clé `t` absente plutôt que vide (F7) : `t=` sans valeur est une forme
+            # jamais vue à l'entraînement, où l'horodatage est soit renseigné, soit
+            # tout simplement omis de l'en-tête.
+            fields["t"] = t["t"]
+        segs.append(Segment(header=format_header(fields), content=t["text"].encode("utf-8")))
+    return segs
 
 
 def _load_conversation(path):

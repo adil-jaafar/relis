@@ -105,11 +105,16 @@ class Controller:
         channels = [(n, s) for n, s in (("history", history), ("docs", docs)) if s]
         yield Event("turn_start", text=query.decode("utf-8", "replace"))
 
-        def encode(partial: bytes, note: bytes):
+        def encode(partial: bytes, note: bytes, first: bool):
             self._feed(bytes([C.ENC]) + query, MODE_ENC)
-            if partial:
+            if not first:
+                # Passe au-delà de la première (après un REFRESH) : PART puis NOTE
+                # sont TOUJOURS émis, même vides. `GEN_CODES` permet REFRESH sans
+                # passer par NOTE (note vide) : sans ce `first`, un REFRESH nu
+                # donnerait `ENC query PART partiel SCAN` (NOTE et son marqueur
+                # purement absents) au lieu de `ENC query PART partiel NOTE SCAN` —
+                # une séquence jamais vue à l'entraînement (spec §9, F5).
                 self._feed(bytes([C.PART]) + partial, MODE_ENC)
-            if note:
                 self._feed(bytes([C.NOTE]) + note, MODE_ENC)
 
         def scan():
@@ -121,8 +126,12 @@ class Controller:
                 for si, seg in enumerate(segs):
                     cnt["segments"] += 1
                     over = cnt["read"] >= bud.max_read_bytes or cnt["segments"] > bud.max_segments
-                    self._feed(bytes([C.SEG]) + seg.header.encode("utf-8"), MODE_SCAN)
-                    lg = self._feed(bytes([C.HDR]), MODE_SCAN)
+                    # SEG + en-tête et HDR fusionnés en un seul `_feed` (F7) : même
+                    # mode, mêmes octets dans le même ordre qu'avant, juste sans la
+                    # frontière d'appel artificielle entre les deux — un balayage de
+                    # 64 ko économise ainsi des milliers de passes modèle inutiles
+                    # (un en-tête tient presque toujours dans un seul chunk `_feed`).
+                    lg = self._feed(bytes([C.SEG]) + seg.header.encode("utf-8") + bytes([C.HDR]), MODE_SCAN)
                     a = self._decide(lg, frozenset({C.SKIP}) if over else AFTER_HDR)
                     self._feed_one(a, MODE_SCAN)
                     if a == C.READ:
@@ -210,13 +219,13 @@ class Controller:
                 yield Event("gen_byte", byte=b)
                 lg = self._feed_one(b, MODE_GEN)
 
-        encode(b"", b"")
+        encode(b"", b"", first=True)
         yield from scan()
         while True:
             yield from generate()
             if not pending["refresh"]:
                 break
-            encode(bytes(answer), pending["note"])
+            encode(bytes(answer), pending["note"], first=False)
             yield from scan()
 
         cnt["seconds"] = round(time.time() - t0, 2)
