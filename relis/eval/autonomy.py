@@ -18,24 +18,32 @@ def classify(case, result) -> str:
     """Classe une décision d'arrêt contre l'oracle du cas, à partir de
     `result["stop_at"]` et `result["doc_actions"]` (produits par `harness.run_case`).
 
-    `doc_actions` — pas un simple compteur de documents sautés — est nécessaire car un
-    document nécessaire lu *aux côtés* d'autres documents sautés serait sinon confondu
-    avec un document nécessaire réellement sauté : seul l'index utile compte, pas le
-    nombre de sauts dans l'ensemble du passage. Cet index (`case.passes_needed[0][1]`)
-    est absent de `doc_actions` (jamais atteint car le balayage s'est arrêté avant, dans
-    l'historique ou dans les documents) tout autant que présent-mais-sauté : les deux
-    situations valent « document utile sauté ».
+    Pour un cas sans document nécessaire, `stop_at` (position dans l'historique) se
+    compare directement à `case.stop_index`. Pour un cas AVEC document nécessaire,
+    `stop_at` ne dit que « le balayage s'est arrêté dans les documents » (toujours
+    -1, quel que soit le document en cause — `harness.summarise` ne distingue pas
+    les documents entre eux) : il faut donc l'indice d'arrivée réel, tiré de la
+    longueur de `doc_actions` (`len(doc_actions) - 1`, le dernier document ouvert
+    avant le STOP), pour savoir si le contrôleur s'est arrêté PILE sur le document
+    utile ou s'il a continué à en lire au-delà — sans quoi les deux se confondent
+    en « exact » et gonflent artificiellement ce taux.
     """
     if result["stop_at"] is None:
         return "jamais_stop"
     needed_doc = case.passes_needed[0][1]
-    if needed_doc is not None:
-        doc_actions = result["doc_actions"]
-        if needed_doc >= len(doc_actions) or doc_actions[needed_doc] == "skip":
-            return "doc_utile_saute"
-    if result["stop_at"] == case.stop_index:
+    if needed_doc is None:                                   # cas sans documents
+        if result["stop_at"] == case.stop_index:
+            return "exact"
+        return "trop_tot" if result["stop_at"] < case.stop_index else "trop_tard"
+    actions = result["doc_actions"]
+    if result["stop_at"] != -1:                              # arrêté avant d'ouvrir les documents
+        return "doc_utile_saute"
+    if needed_doc >= len(actions) or actions[needed_doc] == "skip":
+        return "doc_utile_saute"                             # jamais atteint, ou sauté
+    arret = len(actions) - 1                                 # document sur lequel le STOP est tombé
+    if arret == needed_doc:
         return "exact"
-    return "trop_tot" if result["stop_at"] < case.stop_index else "trop_tard"
+    return "trop_tard"                                       # a continué après avoir lu ce qu'il fallait
 
 
 def evaluate(ctl, cases) -> dict:
@@ -70,6 +78,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=777)
     ap.add_argument("--device", default=None)
     args = ap.parse_args(argv)
+    if not (args.repo or args.ckpt):
+        ap.error("--repo ou --ckpt est requis")
     import torch
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     ctl, step = load_controller(args.ckpt or args.repo, device)

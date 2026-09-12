@@ -121,3 +121,39 @@ def test_evaluate_returns_shares_that_sum_to_one():
     assert 0.0 <= res["exactitude"] <= 1.0
     assert res["n"] == 6 and res["octets_lus_moyen"] >= 0
     assert "exact" in format_report(res)
+
+
+def _doc_case(needed_doc):
+    """Cas minimal « document nécessaire » construit sans modèle : `classify` ne lit
+    que `case.passes_needed[0][1]` (et, hors branche documents, `case.stop_index`)."""
+    return Case(kind="doc_lookup", query=b"q", history=[], docs=[], doc_relevant=[],
+                passes_needed=[(set(), needed_doc)], answer_parts=[b"reponse"], notes=[],
+                answer_value="x")
+
+
+def test_classify_doc_never_reached():
+    # Le balayage s'est arrêté DANS les documents (stop_at == -1) mais avant
+    # d'atteindre l'index utile : `doc_actions` est trop court pour l'index 2.
+    c = _doc_case(2)
+    assert classify(c, {"stop_at": -1, "doc_actions": ["read"]}) == "doc_utile_saute"
+
+
+def test_classify_doc_stopped_in_history():
+    # Le balayage s'est arrêté dans l'HISTORIQUE (stop_at != -1) : les documents
+    # n'ont jamais été ouverts, donc le document utile n'a jamais été lu.
+    c = _doc_case(2)
+    assert classify(c, {"stop_at": 1, "doc_actions": []}) == "doc_utile_saute"
+
+
+def test_classify_doc_exact_and_too_late():
+    # L'indice d'arrivée (len(doc_actions) - 1) distingue « arrêté juste après avoir
+    # lu le document utile » de « a continué à lire au-delà » : `stop_at` seul (-1
+    # dans les deux cas) ne permet pas cette distinction.
+    c = _doc_case(1)
+    assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "read"]}) == "exact"
+    assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "read", "read"]}) == "trop_tard"
+
+
+def test_classify_doc_needed_but_skipped():
+    c = _doc_case(1)
+    assert classify(c, {"stop_at": -1, "doc_actions": ["skip", "skip", "read"]}) == "doc_utile_saute"
