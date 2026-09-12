@@ -182,20 +182,42 @@ calcule les décisions exactes, et l'empaquetage en séquences de 16 384 octets.
 
 ### 🟠 En cours — Entraînement ruban sur Kaggle
 
-Mille cinq cents pas, environ vingt-trois heures, deux sessions. Le modèle apprend à décider. C'est
-l'étape qui transforme un modèle de langage en machine à lire.
+Le modèle apprend à décider. C'est l'étape qui transforme un modèle de langage en machine à lire, et
+elle a réussi bien plus vite que prévu.
 
-Ce qu'on surveille, à partir de la ligne de validation imprimée toutes les trente minutes :
+**La thèse du projet est démontrée au pas 52.** Sur un épisode jamais vu, sondé en probabilité :
 
 ```
-[val] équilibrée 0.326 | acc 0.840 | n 2277 | STOP 0/133 SKIP 0/62 NOTE 0/30
-      NEXT 0/27 END 4/103 REFRESH 17/30 READ 995/995 CONT 897/897
+   1..9  CONT            CONT 0.99+   STOP 0.000
+  10     STOP  <-- ici   CONT 0.088   STOP 0.903
 ```
 
-Au sixième pas, le modèle a trouvé la solution paresseuse : toujours répondre READ et CONT, les
-classes majoritaires, ce qui donne déjà 84 % d'exactitude brute. Les cinq décisions qui comptent sont
-à zéro. Le chiffre à suivre est l'**exactitude équilibrée**, et la sortie de zéro de **STOP**. Si rien
-ne bouge au pas 300, un levier de rééquilibrage est prêt : `--override train.decision_balance=0.5`.
+Le modèle donne 90 % de probabilité à STOP au seul segment qui contient la réponse, et
+essentiellement zéro aux neuf autres. Marge de 962 contre 1 au hasard.
+
+| ≈ pas | équilibrée | STOP | SKIP | NEXT | NOTE |
+|---|---|---|---|---|---|
+| 13 | 0,321 | 0/133 | 0/62 | 0/27 | 0/30 |
+| 26 | 0,673 | 66/133 | 62/62 | 0/27 | 0/30 |
+| 39 | 0,826 | 124/133 | 61/62 | 16/27 | 8/30 |
+| 52, épisodes **jamais vus** | **0,851** | 299/311 | 132/132 | 51/64 | 9/89 |
+
+Le score sur épisodes inédits dépasse celui de la validation : aucun surapprentissage, le mécanisme
+généralise. SKIP et REFRESH sont à 100 %.
+
+**NOTE reste à 10 %**, et la mesure est trop sévère pour lui : en forçage on exige l'émission à
+l'octet exact où l'oracle l'a placée, alors qu'à l'inférence il suffit de déclencher au bon moment
+approximatif. STOP choisit parmi trois à une position marquée ; NOTE se décide à chaque octet généré.
+REFRESH à 100 % montre que le mécanisme fonctionne dès qu'il est enclenché.
+
+**Calendrier revu.** Le masque de segment de l'attention locale coûte cher : environ 140 secondes par
+pas, deux fois et demie le pré-entraînement. Les 1 500 pas prévus demanderaient 58 heures. Comme les
+décisions saturent avant le pas 50, le run est ramené à `train.max_steps=500`, soit 1,2 passage sur
+les données et deux sessions.
+
+**Dérive de génération : légère.** Le français reste grammatical et s'est libéré du gabarit « commune
+française » qui bloquait tout après le pré-entraînement. Le code dérive davantage. Le rappel à 10 %
+du gradient tient la langue sans la figer.
 
 ### ⬜ Plan 3 — Le contrôleur et la démonstration
 
