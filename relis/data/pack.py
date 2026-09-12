@@ -184,6 +184,28 @@ class TapeWindows:
                 "slots_reset": (flags[:, :-1] & FLAG_SLOTS).bool()}
 
 
+def decision_counts(dir: str, max_seqs: int | None = 2000) -> dict[int, int]:
+    """Compte les octets aux positions de décision (`wclass == W_HIGH`) d'un shard
+    ruban déjà empaqueté (répertoire avec `meta.json`, `data.bin`, `wclass.bin`).
+
+    Limité aux `max_seqs` premières séquences (`None` = tout le shard) pour rester
+    rapide : quelques secondes sur 2 000 séquences de 16 384 octets.
+    """
+    meta = json.load(open(os.path.join(dir, "meta.json"), encoding="utf-8"))
+    seq_len, n = meta["seq_len"], meta["n"]
+    n_use = n if max_seqs is None else min(n, max_seqs)
+    shape = (n, seq_len)
+    data = np.memmap(os.path.join(dir, "data.bin"), dtype=np.uint8, mode="r", shape=shape)
+    wclass = np.memmap(os.path.join(dir, "wclass.bin"), dtype=np.uint8, mode="r", shape=shape)
+    if n_use == 0:
+        return {}
+    data_u = np.asarray(data[:n_use])
+    wclass_u = np.asarray(wclass[:n_use])
+    sel = data_u[wclass_u == W_HIGH]
+    counts = np.bincount(sel, minlength=256)
+    return {int(b): int(c) for b, c in enumerate(counts) if c > 0}
+
+
 class _Mix:
     """Somme des poids (WEIGHTS) par classe sur les positions écrites ; rappel compté à part."""
 

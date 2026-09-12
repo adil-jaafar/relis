@@ -28,6 +28,8 @@ train:
   hub_every_minutes: 120
   time_budget_hours: 11.5
   init_from: null        # ex. jaafar2022/relis-v1-pretrain (poids du pré-entraînement)
+  decision_balance: 0.0  # 0 = désactivé ; passer à 0.5 par --override train.decision_balance=0.5
+                         # si STOP/SKIP/NEXT restent à zéro
   compile: false
 data:
   train_dir: /kaggle/input/relis-tapes/train

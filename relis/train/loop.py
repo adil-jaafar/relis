@@ -32,6 +32,7 @@ class TrainConfig:
     warmup_frac: float | None = None        # si défini, warmup = warmup_frac × max_steps (prime sur warmup_steps)
     compile: bool = False                   # torch.compile sur le cœur GDN (opt-in, mesurer avec bench --compile)
     init_from: str | None = None            # poids seuls, si run_dir n'a pas de checkpoint
+    decision_balance: float = 0.0           # exposant alpha du rééquilibrage des décisions rares ; 0 = désactivé
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -92,9 +93,50 @@ def _as_batch(b) -> dict:
     return {"x": x, "y": y}
 
 
-def _loss(model, batch, device, amp, norm: "torch.Tensor | float | None" = None):
+def decision_multipliers(counts: dict, alpha: float) -> torch.Tensor:
+    """Multiplicateur par octet `(256,)` float32 pour rééquilibrer les décisions rares.
+
+    `alpha == 0` renvoie exactement un tenseur de 1 (désactivé). Sinon, pour chaque
+    octet compté : `m_c = (N_tot / N_c) ** alpha`, puis normalisation par la moyenne
+    pondérée par la population (`m_c /= (Σ_c N_c·m_c) / N_tot`) pour que la masse
+    totale des décisions (`Σ_c N_c·m_c`) reste égale à `N_tot`. Les octets non
+    comptés valent 1.0.
+    """
+    m = torch.ones(256, dtype=torch.float32)
+    if alpha == 0.0 or not counts:
+        return m
+    n_tot = float(sum(counts.values()))
+    for byte, n_c in counts.items():
+        m[byte] = (n_tot / n_c) ** alpha
+    weighted_mean = sum(n_c * m[byte].item() for byte, n_c in counts.items()) / n_tot
+    for byte in counts:
+        m[byte] = m[byte] / weighted_mean
+    return m
+
+
+def effective_weights(batch: dict, byte_mult, device) -> "torch.Tensor | None":
+    """Poids par position effectivement utilisés pour la perte : `w` (poids ruban) si
+    `byte_mult` est `None`, sinon `w * byte_mult[y]`. `None` si le lot n'a pas de `w`
+    (ex. lot tuple de pré-entraînement) : `byte_mult` seul ne pondère rien.
+
+    Point d'unicité pour `_loss` et `train` (calcul de `w_total`) : s'ils divergent,
+    le taux d'apprentissage effectif change silencieusement.
+    """
+    b = _as_batch(batch)
+    w = b.get("w")
+    if w is None:
+        return None
+    w = w.to(device).reshape(-1).float()
+    if byte_mult is None:
+        return w
+    y = b["y"].to(device).reshape(-1)
+    return w * byte_mult.to(device)[y]
+
+
+def _loss(model, batch, device, amp, norm: "torch.Tensor | float | None" = None, byte_mult=None):
     """`norm` : diviseur explicite (Σ w sur le lot effectif complet, sous accumulation de
-    gradient) ; si None, normalise localement (moyenne, ou moyenne pondérée si `w` est présent)."""
+    gradient) ; si None, normalise localement (moyenne, ou moyenne pondérée si `w` est présent).
+    `byte_mult` : voir `effective_weights` — `None` laisse le comportement inchangé."""
     b = _as_batch(batch)
     x, y = b["x"].to(device), b["y"].to(device)
     core = _unwrap(model)
@@ -109,9 +151,9 @@ def _loss(model, batch, device, amp, norm: "torch.Tensor | float | None" = None)
                         dtype=torch.float16, enabled=amp and device.startswith("cuda")):
         logits, _ = model(x, mode, state, **kw)
     ce = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="none")
-    if b.get("w") is None:
+    w = effective_weights(b, byte_mult, device)
+    if w is None:
         return ce.sum() / norm if norm is not None else ce.mean()
-    w = b["w"].to(device).reshape(-1).float()
     return (ce * w).sum() / norm if norm is not None else (ce * w).sum() / w.sum().clamp_min(1e-6)
 
 
@@ -172,15 +214,29 @@ def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
 
 
 def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
-          resume=True, on_step=None, extra_val=None) -> dict:
+          resume=True, on_step=None, extra_val=None, byte_mult=None) -> dict:
     """`extra_val` : `(model) -> dict | str` optionnel, appelé au(x) point(s) de
     sauvegarde et en fin de run ; le résultat est simplement imprimé (`f"[val] {…}"`),
     donc une chaîne déjà formatée (ex. `format_decision_report`) convient aussi bien
-    qu'un dict brut."""
+    qu'un dict brut.
+
+    `byte_mult` : multiplicateur par octet `(256,)` optionnel (voir
+    `decision_multipliers`), transmis tel quel à `effective_weights` dans `_loss` et
+    dans le calcul de `w_total` ci-dessous — c'est essentiel : si les deux
+    divergent, le taux d'apprentissage effectif change silencieusement."""
     assert tcfg.seq_len >= _unwrap(model).cfg.block, (
         "seq_len doit être ≥ block : sinon le module d'écriture du Buffer ne reçoit "
         "aucun gradient et DDP échoue")
     is_main = int(os.environ.get("RANK", "0")) == 0
+    if is_main:
+        if byte_mult is None:
+            print(f"[balance] alpha={tcfg.decision_balance:.1f} (désactivé)")
+        else:
+            from relis.tape import codes as C
+            items = sorted(((C.name(c), byte_mult[c].item()) for c in sorted(C.DECISION_CODES)),
+                           key=lambda kv: -kv[1])
+            mults = " ".join(f"{name} ×{v:.2f}" for name, v in items)
+            print(f"[balance] alpha={tcfg.decision_balance:.1f} ; multiplicateurs : {mults}")
     t_start = time.time()
     if tcfg.compile:
         enable_compile()
@@ -245,13 +301,14 @@ def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
         w_total = 0.0
         for bb in batches:
             bd = _as_batch(bb)
-            w_total += float(bd["w"].sum().item()) if bd.get("w") is not None else float(bd["y"].numel())
+            w = effective_weights(bd, byte_mult, device)
+            w_total += float(w.sum().item()) if w is not None else float(bd["y"].numel())
         w_total = max(w_total, 1e-6)
         acc = 0.0
         for bb in batches:
             # norm=w_total : Σ w·ce sur le lot effectif complet (tous les micro-lots de
             # l'accumulation), pas une moyenne de moyennes locales.
-            loss = _loss(model, bb, device, tcfg.amp, norm=w_total)
+            loss = _loss(model, bb, device, tcfg.amp, norm=w_total, byte_mult=byte_mult)
             scaler.scale(loss).backward()
             acc += loss.item()
         scaler.unscale_(opt)

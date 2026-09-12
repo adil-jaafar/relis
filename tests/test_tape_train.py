@@ -4,9 +4,10 @@ import torch
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
 from relis.tape import codes as C
-from relis.data.pack import build_shards, TapeWindows
+from relis.data.pack import build_shards, TapeWindows, decision_counts
 from relis.data.shards import ShardWriter
-from relis.train.loop import TrainConfig, train, _loss, load_weights, fetch_weights_path, _make_optimizer
+from relis.train.loop import (TrainConfig, train, _loss, load_weights, fetch_weights_path,
+                              _make_optimizer, decision_multipliers)
 from relis.train.metrics import decision_accuracy
 from relis.train.checkpoint import save_checkpoint
 
@@ -308,3 +309,56 @@ def test_budget_exit_pushes_to_hub(tmp_path, tapes, monkeypatch):
     assert out["stopped_by_budget"] is True
     assert (run_dir / "last.pt").exists()
     assert len(pushes) == 1 and pushes[0] == "x/y"
+
+
+def test_decision_multipliers_preserve_total_mass():
+    counts = {C.READ: 400, C.SKIP: 20}
+    m = decision_multipliers(counts, alpha=1.0)
+    assert abs(m[C.SKIP].item() / m[C.READ].item() - 20.0) < 1e-6
+    total_mass = sum(n * m[b].item() for b, n in counts.items())
+    assert abs(total_mass - sum(counts.values())) < 1e-4
+
+
+def test_decision_multipliers_alpha_zero_is_identity():
+    counts = {C.READ: 400, C.SKIP: 20, C.STOP: 3}
+    m = decision_multipliers(counts, alpha=0.0)
+    assert torch.equal(m, torch.ones(256, dtype=torch.float32))
+
+
+def test_effective_weights_used_consistently(tapes):
+    tr, va = tapes
+    m = RelisModel(RelisConfig.tiny())
+    batch = tr.sample(4, torch.Generator().manual_seed(0))  # couvre plusieurs codes de décision
+
+    ones = torch.ones(256, dtype=torch.float32)
+    l_plain = _loss(m, batch, "cpu", amp=False)
+    l_ones = _loss(m, batch, "cpu", amp=False, byte_mult=ones)
+    assert torch.allclose(l_plain, l_ones, atol=1e-6)
+
+    train_dir = os.path.dirname(tr.data.filename)
+    counts = decision_counts(train_dir)
+    mult = decision_multipliers(counts, alpha=1.0)
+    l_mult = _loss(m, batch, "cpu", amp=False, byte_mult=mult)
+    assert not torch.allclose(l_plain, l_mult, atol=1e-6)
+
+
+def test_decision_counts_matches_manual_scan(tapes):
+    import json
+    import numpy as np
+    from relis.tape.tape import W_HIGH
+
+    tr, va = tapes
+    train_dir = os.path.dirname(tr.data.filename)
+    counts = decision_counts(train_dir)
+
+    meta = json.load(open(os.path.join(train_dir, "meta.json"), encoding="utf-8"))
+    n, seq_len = meta["n"], meta["seq_len"]
+    data = np.memmap(os.path.join(train_dir, "data.bin"), dtype=np.uint8, mode="r", shape=(n, seq_len))
+    wclass = np.memmap(os.path.join(train_dir, "wclass.bin"), dtype=np.uint8, mode="r", shape=(n, seq_len))
+    manual = {}
+    for i in range(n):
+        for j in range(seq_len):
+            if int(wclass[i, j]) == W_HIGH:
+                b = int(data[i, j])
+                manual[b] = manual.get(b, 0) + 1
+    assert counts == manual

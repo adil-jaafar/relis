@@ -12,8 +12,8 @@ import yaml
 
 from relis.model.config import RelisConfig
 from relis.model.relis import RelisModel
-from relis.data.pack import TapeWindows
-from .loop import TrainConfig, train
+from relis.data.pack import TapeWindows, decision_counts
+from .loop import TrainConfig, train, decision_multipliers
 from .metrics import decision_accuracy, format_decision_report
 from .pretrain import _apply_overrides, resolve_data_path
 
@@ -61,10 +61,15 @@ def main(argv=None):
             f"shard {tag} : seq_len empaqueté {ds.seq_len} incompatible avec train.seq_len "
             f"{tcfg.seq_len} ; les rubans sont décalés d'un octet, il faut "
             f"seq_len empaqueté == train.seq_len + 1 (ici {tcfg.seq_len + 1})")
+    byte_mult = None
+    if tcfg.decision_balance > 0:
+        counts = decision_counts(train_dir)
+        byte_mult = decision_multipliers(counts, tcfg.decision_balance)
+
     extra = lambda m: format_decision_report(decision_accuracy(
         m, val_ds, n_batches=tcfg.val_batches, batch_size=max(1, tcfg.batch_size), device=device))
     out = train(model, tcfg, train_ds, val_ds, args.run_dir, device=device,
-                resume=not args.no_resume, extra_val=extra)
+                resume=not args.no_resume, extra_val=extra, byte_mult=byte_mult)
     if int(os.environ.get("RANK", "0")) == 0:
         print(out)
     if world > 1:
