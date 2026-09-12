@@ -8,6 +8,34 @@ from .loop import _as_batch, _unwrap
 _DECISIONS = sorted(C.DECISION_CODES)
 
 
+def balanced_accuracy(per_code: dict) -> float:
+    """Moyenne des taux par code (`{nom: [correct, total]}`) sur les seuls codes
+    présents (`total > 0`). `float("nan")` si aucun code n'est présent.
+
+    Sépare l'exactitude « équilibrée » du calcul de forçage : sur un jeu où READ et
+    CONT dominent, l'exactitude brute peut rester haute (majorité correcte) alors que
+    STOP, SKIP, NEXT restent à zéro — ce que cette moyenne par code fait ressortir.
+    """
+    rates = [c / n for c, n in per_code.values() if n > 0]
+    return sum(rates) / len(rates) if rates else float("nan")
+
+
+def format_decision_report(res: dict) -> str:
+    """Ligne compacte pour le journal : `équilibrée`, `acc`, `n`, puis chaque code
+    `NOM correct/total`, triés par taux croissant (les échecs sautent aux yeux) ;
+    en cas d'égalité de taux, ordre décroissant de `total`."""
+    per_code = res["per_code"]
+
+    def _rate(item):
+        _, (c, n) = item
+        return c / n if n > 0 else 0.0
+
+    ordered = sorted(per_code.items(), key=lambda item: (_rate(item), -item[1][1]))
+    codes = " ".join(f"{name} {c}/{n}" for name, (c, n) in ordered)
+    return (f"équilibrée {res['acc_balanced']:.3f} | acc {res['acc']:.3f} | "
+            f"n {res['n']} | {codes}")
+
+
 @torch.no_grad()
 def decision_accuracy(model, ds, n_batches: int, batch_size: int, device: str) -> dict:
     model.eval()
@@ -36,4 +64,5 @@ def decision_accuracy(model, ds, n_batches: int, batch_size: int, device: str) -
                 per_code[C.name(c)][0] += k; per_code[C.name(c)][1] += n
                 correct += k; total += n
     model.train()
-    return {"acc": correct / total if total else float("nan"), "n": total, "per_code": per_code}
+    return {"acc": correct / total if total else float("nan"), "n": total,
+            "per_code": per_code, "acc_balanced": balanced_accuracy(per_code)}

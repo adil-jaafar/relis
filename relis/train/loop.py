@@ -173,6 +173,10 @@ def bits_per_byte(model, ds, seq_len, n_batches, batch_size, device) -> float:
 
 def train(model, tcfg: TrainConfig, train_ds, val_ds, run_dir, device="cuda",
           resume=True, on_step=None, extra_val=None) -> dict:
+    """`extra_val` : `(model) -> dict | str` optionnel, appelé au(x) point(s) de
+    sauvegarde et en fin de run ; le résultat est simplement imprimé (`f"[val] {…}"`),
+    donc une chaîne déjà formatée (ex. `format_decision_report`) convient aussi bien
+    qu'un dict brut."""
     assert tcfg.seq_len >= _unwrap(model).cfg.block, (
         "seq_len doit être ≥ block : sinon le module d'écriture du Buffer ne reçoit "
         "aucun gradient et DDP échoue")
