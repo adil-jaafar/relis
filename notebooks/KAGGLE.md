@@ -144,6 +144,19 @@ Dataset `relis-tapes`.
                data.val_dir=/kaggle/input/datasets/<utilisateur>/relis-tapes/val
 ```
 `init_from` ne sert qu'au premier lancement (poids du pré-entraînement) ; les sessions suivantes reprennent
-depuis le Hub `relis-v1-tape`. À chaque checkpoint, la ligne `[val] {...}` donne l'exactitude des décisions
-contre l'oracle, globale et par code (READ/SKIP/CONT/STOP/NEXT/END/REFRESH/NOTE) : c'est la métrique qui dit
-si RELIS apprend à *décider*, indépendamment de la perte.
+depuis le Hub `relis-v1-tape`. À chaque checkpoint, la ligne `[val] ...` donne l'exactitude des décisions
+contre l'oracle, sous la forme :
+```
+[val] équilibrée 0.352 | acc 0.845 | n 924 | STOP 0/54 END 0/38 SKIP 0/21 NOTE 0/16 NEXT 0/11 REFRESH 13/16 CONT 362/362 READ 406/406
+```
+**`acc` seule est trompeuse** : READ et CONT dominent largement le trafic de décisions, donc la stratégie
+« toujours prédire la classe majoritaire » donne déjà `acc 0.845` sans que le modèle ait appris quoi que ce
+soit sur STOP, SKIP, NEXT, END ou NOTE. C'est `équilibrée` (la moyenne des taux par code présent, READ/CONT
+inclus mais sans les sur-pondérer) qu'il faut surveiller, avec le détail par code trié par taux croissant
+(les échecs — souvent `0/N` pour les décisions rares — sautent aux yeux en tête de ligne).
+
+Si STOP, SKIP, NEXT (ou END/NOTE) restent bloqués à `0/N` au-delà de 300 pas, le recours est
+`--override train.decision_balance=0.5` : ce levier ré-échantillonne l'importance des décisions rares dans la
+perte (poids par octet ré-équilibré, masse totale inchangée) sans relancer une nouvelle image ni changer les
+données. Désactivé par défaut (`decision_balance=0.0`) : à activer seulement si le rapport de décisions le
+justifie.
