@@ -147,7 +147,7 @@ Dataset `relis-tapes`.
 depuis le Hub `relis-v1-tape`. À chaque checkpoint, la ligne `[val] ...` donne l'exactitude des décisions
 contre l'oracle, sous la forme :
 ```
-[val] équilibrée 0.352 | acc 0.845 | n 924 | STOP 0/54 END 0/38 SKIP 0/21 NOTE 0/16 NEXT 0/11 REFRESH 13/16 CONT 362/362 READ 406/406
+[val] équilibrée 0.352 | acc 0.845 | n 924 | STOP 0/54 END 0/38 SKIP 0/21 NOTE 0/16 NEXT 0/11 REFRESH 13/16 READ 406/406 CONT 362/362
 ```
 **`acc` seule est trompeuse** : READ et CONT dominent largement le trafic de décisions, donc la stratégie
 « toujours prédire la classe majoritaire » donne déjà `acc 0.845` sans que le modèle ait appris quoi que ce
