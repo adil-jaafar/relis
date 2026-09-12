@@ -24,6 +24,8 @@ train:
   amp: true
   ckpt_every_minutes: 30
   log_every: 20
+  val_batches: 8         # à 4 lots, NEXT et NOTE sont jugés sur une dizaine de cas ; à 8, ~1 min
+                         # de validation toutes les 30 min sur le rang principal
   hub_repo: null         # ex. jaafar2022/relis-v1-tape
   hub_every_minutes: 120
   time_budget_hours: 11.5
