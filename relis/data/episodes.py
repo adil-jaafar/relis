@@ -11,7 +11,7 @@ Les plages de remplissage sont choisies pour que ce cas soit rarissime — le
 garde-fou est une ceinture de sécurité, pas le mécanisme principal.
 """
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from relis.tape import codes as C
 from relis.tape.headers import format_header
