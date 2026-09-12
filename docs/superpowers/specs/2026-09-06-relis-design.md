@@ -258,17 +258,42 @@ for channel in [history, docs]:
         if STOP: break → generate
         if NEXT: break → canal suivant
 generate():
-    loop: b = decide(texte valide ∪ {END, REFRESH, RECALL})
-        END → fin ; REFRESH → reset Mémoire, encode(query + PART + partiel), rescan, continue
-        RECALL → cellule = extraits.nearest(clé) ; si confiance < seuil : annuler, continuer en octets
-                 sinon : écrire adresse (2 octets), réinjecter les octets de la cellule en mode chunk
+    loop: b = decide(texte valide ∪ {END, REFRESH, NOTE})
+        END → fin
+        NOTE → écrire la note (texte ∪ {REFRESH}), puis REFRESH
+        REFRESH → reset Mémoire (état GDN + fenêtre locale ; pending, seen et slots continuent),
+                  encode(query + PART + partiel + NOTE + note), rescan, continue
 ```
 
-Pendant READ, le contrôleur alimente aussi les Extraits (spans candidats, clés depuis l'état du sommet de pile). Chaque étape émet un **événement** (segment lu, sauté, STOP, NEXT, octet, RECALL avec sa source, REFRESH, END, snapshot du Buffer) consommé par le CLI et par l'interface.
+**Primitive unique.** Le contrôleur avale des octets dans un mode donné et récupère les logits de la
+dernière position ; décider, c'est masquer ces logits aux octets légaux et prendre le maximum. Le
+balayage passe par le mode bloc, la génération par le mode pas-à-pas ; l'équivalence numérique des
+deux est prouvée par les tests du plan 1.
+
+**Cas limites câblés dans le contrôleur, pas appris** (§4.7) : au dernier segment de l'historique,
+CONT vaut NEXT s'il existe des documents, STOP sinon ; au dernier document, CONT et NEXT valent STOP.
+Le modèle n'a donc jamais à connaître la longueur d'un canal.
+
+**Budgets.** Quatre plafonds bornent un tour et rendent la main même si le modèle n'émet jamais STOP :
+octets lus, segments balayés, relectures (8, §4.8) et octets générés. Un budget épuisé pendant le
+balayage force STOP ; épuisé pendant la génération, il force END.
+
+**RECALL est hors périmètre V1 du contrôleur** : les rubans d'entraînement n'émettent pas de cible
+RECALL, le modèle n'a donc jamais vu ce code. Les Extraits demandent de modifier le constructeur de
+rubans, de régénérer le jeu de données et de réentraîner ; ils viennent après (§13).
+
+Chaque étape émet un **événement** (segment lu, sauté, STOP, NEXT, octet, note, REFRESH, END,
+compteurs) consommé par le CLI.
 
 ### 7.2 Décodage contraint
 
-Deux masques combinés à chaque position : le masque de phase (codes autorisés, §4.7) et un **automate UTF-8** qui interdit tout octet produisant une séquence invalide (par exemple un octet de tête après un octet de tête). Aucun caractère cassé n'est émis. RECALL n'est autorisé qu'à une frontière de caractère UTF-8 ; les octets d'adresse ne passent pas par la tête d'octets (ils sont écrits par le contrôleur d'après la cellule choisie) et l'automate reprend après la réinjection.
+Deux masques combinés à chaque position : le masque de phase (codes autorisés, §4.7) et un **automate
+UTF-8** qui interdit tout octet produisant une séquence invalide. L'automate applique la table complète
+des octets de tête et de continuation, plages restreintes comprises : `E0` exige une première
+continuation `A0-BF`, `ED` exige `80-9F` pour exclure les demi-codets, `F0` exige `90-BF` et `F4`
+exige `80-8F`. Les encodages trop longs et les demi-codets sont donc impossibles, pas seulement rares.
+Les codes de contrôle ne sont autorisés qu'à une frontière de caractère. **Aucun caractère cassé ne
+peut être émis**, et cette garantie se teste directement en balayant les 256 octets à chaque état.
 
 ### 7.3 Coût et honnêteté
 
@@ -276,8 +301,16 @@ Le balayage traite les octets par chunks (débit élevé, ~10 k octets/s par T4 
 
 ## 8. Démo
 
-- **CLI** : conversation, `/attach <fichier>` (n'importe quel nombre, n'importe quelle taille ; texte, markdown, code ; PDF converti en texte côté contrôleur), affichage des décisions.
-- **Application Gradio** (lien partageable depuis Colab) montrant en direct : la liste des segments avec leur état (lu / sauté / non atteint), la position du STOP, la traduction du Buffer se formant pendant la lecture, les rappels d'Extraits surlignés dans la réponse avec un lien vers leur source, les REFRESH, un compteur « octets lus / octets écrits / % de l'historique économisé », et la réponse en streaming. Documents par glisser-déposer.
+**Le terminal est la démonstration.** La CLI affiche la lecture en direct : chaque segment avec son
+en-tête, sa taille et son sort (lu, sauté, non atteint), la position du STOP, la note en clair avant
+une relecture, puis la réponse en flux et une ligne de comptes (octets lus, octets écrits, relectures,
+durée, part de l'historique économisée). Couleurs en ANSI direct, sans dépendance nouvelle, avec repli
+automatique quand la sortie n'est pas un terminal. Les documents se joignent par `--doc fichier`,
+autant de fois que voulu ; la conversation persiste d'un tour à l'autre dans un fichier JSON.
+
+**L'application Gradio** (lien partageable depuis Colab) reprend le même flux d'événements avec un
+habillage web et le dépôt de documents par glisser-déposer. Elle vient après la CLI : le contrôleur et
+ses événements sont le travail, l'interface n'est qu'un rendu de plus.
 
 ## 9. Évaluation
 
@@ -285,12 +318,21 @@ Le balayage traite les octets par chunks (débit élevé, ~10 k octets/s par T4 
 |---|---|
 | Bits par octet sur FR et code tenus à part, RELIS vs baseline | Qualité de modélisation à taille égale |
 | Tâches aiguille, historique de 1 ko à 200 ko (au-delà des longueurs d'entraînement), exactitude vs longueur | Contexte illimité ; la baseline s'effondre au-delà de 4 ko |
-| Décisions vs oracle : précision/rappel de STOP, SKIP, NEXT ; % d'octets économisés à exactitude égale | Calcul adaptatif réel |
+| Décisions vs oracle **en forçage** : exactitude par code et exactitude équilibrée | Le signal est appris |
+| Décisions vs oracle **en autonomie** : arrêt au bon segment, trop tôt, trop tard, document utile sauté | Le signal survit à la composition des erreurs |
+| Octets lus sur questions faciles contre difficiles | Calcul adaptatif réel |
 | Documents : N de 1 à 200, taille jusqu'à 1 Mo, aiguille dans un seul | Illimité côté documents ; utilité de SKIP |
 | Cent prompts FR jugés par le professeur, RELIS vs baseline (préférence aveugle) | Utilisabilité conversationnelle |
 | REFRESH : cohérence des réponses longues avec et sans (ablation) | Le mécanisme sert |
 | Extraits : exactitude des chaînes copiées (identifiants, nombres, URL) et octets/s de génération, avec et sans le module | Le presse-papiers corrige les copies et accélère |
 | Sonde : accord humain sur 50 traductions du Buffer | Le Buffer porte bien l'intention |
+| Caractères UTF-8 invalides émis | Doit être exactement zéro, par construction du décodage contraint |
+
+**Forçage contre autonomie.** La mesure en forçage juge chaque décision en supposant correctes toutes
+celles qui la précèdent. En autonomie les erreurs se composent : un STOP émis un segment trop tôt et
+le modèle ne verra jamais le fait, donc la réponse sera fausse quelle que soit la qualité du reste.
+Une exactitude élevée en forçage ne garantit donc rien de bout en bout, et seule la mesure en
+autonomie dit si le contrôleur fonctionne.
 
 ## 10. Dépôt et modules
 
@@ -308,7 +350,8 @@ relis/
                episodes.py (générateur synthétique + oracle), teacher.py (étiquetage Colab),
                pack.py (rubans rembourrés à 512, empaquetés en 16 384, quatre tableaux parallèles)
   train/       pretrain.py, tape_train.py, probe_train.py, reprise HF Hub
-  infer/       controller.py (boucle, événements), constrain.py (UTF-8 + phases), cli.py, app.py
+  infer/       sample.py (échantillonnage brut) ; constrain.py (masques de phase + automate UTF-8),
+               controller.py (boucle, événements, budgets), render.py (terminal ANSI), cli.py, app.py
   eval/        bpb.py, needle.py, decisions.py, docs.py, judge.py
   baseline/    Transformer sur octets, même API que model/
   notebooks/   lanceurs Kaggle / Colab (configuration seulement)
