@@ -61,3 +61,25 @@ def test_note_and_refresh_are_shown():
 
 def test_supports_color_on_plain_stringio():
     assert supports_color(io.StringIO()) is False
+
+
+def test_streamed_accented_characters_are_not_mojibake():
+    buf = io.StringIO()
+    events = [Event("gen_byte", byte=b) for b in "café".encode("utf-8")]
+    out = TerminalRenderer(buf, color=False).run(events)
+    s = buf.getvalue()
+    assert "café" in s
+    assert "�" not in s
+    assert out == "café"
+
+
+def test_note_after_streaming_starts_on_its_own_line():
+    buf = io.StringIO()
+    events = [Event("gen_byte", byte=b) for b in "partiel".encode()]
+    events.append(Event("note", text="il manque la ville"))
+    events.append(Event("turn_end", text="partiel", stats={"read": 0, "written": 7, "refresh": 1,
+                                                            "segments": 0, "available": 0,
+                                                            "seconds": 0.1, "saved": 0.0}))
+    TerminalRenderer(buf, color=False).run(events)
+    lines = buf.getvalue().splitlines()
+    assert not any("partiel" in line and "il manque" in line for line in lines)

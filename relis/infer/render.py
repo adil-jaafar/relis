@@ -3,6 +3,7 @@
 Couleurs en ANSI direct, sans dépendance. Repli automatique quand la sortie n'est pas
 un terminal, et option explicite pour forcer l'un ou l'autre.
 """
+import codecs
 import os
 import sys
 
@@ -22,13 +23,22 @@ class TerminalRenderer:
         self.color = supports_color(self.out) if color is None else bool(color)
         self.quiet = quiet
         self._answer = []
+        # Un caractère peut s'étaler sur jusqu'à quatre octets UTF-8 : le décodeur
+        # incrémental retient les octets de tête en attente plutôt que de les
+        # décoder (et donc les corrompre) un par un.
+        self._dec = codecs.getincrementaldecoder("utf-8")("replace")
+        self._inline = False       # vrai juste après un octet de génération streamé
 
     def _c(self, name: str, s: str) -> str:
         return f"{ANSI[name]}{s}{ANSI['reset']}" if self.color else s
 
     def _w(self, s: str = "") -> None:
         if not self.quiet:
+            if self._inline:
+                self.out.write("\n")
+                self._inline = False
             self.out.write(s + "\n")
+            self.out.flush()
 
     def handle(self, e) -> None:
         k = e.kind
@@ -36,7 +46,9 @@ class TerminalRenderer:
             self._w()
             self._w(self._c("bold", "? ") + e.text)
         elif k == "channel":
-            self._w(self._c("teal", f"  ⟨{e.channel}⟩ ") + self._c("grey", f"{e.size} segments"))
+            n = e.size
+            self._w(self._c("teal", f"  ⟨{e.channel}⟩ ") +
+                    self._c("grey", f"{n} segment" + ("" if n == 1 else "s")))
         elif k == "segment":
             lu = e.action == "read"
             mark = self._c("green", "  ✓") if lu else self._c("grey", "  ⨯")
@@ -53,8 +65,11 @@ class TerminalRenderer:
             ch = bytes([e.byte])
             self._answer.append(ch)
             if not self.quiet:
-                self.out.write(ch.decode("utf-8", "replace"))
-                self.out.flush()
+                s = self._dec.decode(ch)
+                if s:                   # rien à afficher tant qu'un caractère est incomplet
+                    self.out.write(s)
+                    self.out.flush()
+                    self._inline = True
         elif k == "end":
             self._w()
         elif k == "turn_end":

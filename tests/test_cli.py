@@ -53,4 +53,6 @@ def test_cli_second_turn_reads_previous_history(tmp_path, capsys):
 def test_cli_quiet_prints_only_answer(tmp_path, capsys):
     cli.main(["--ckpt", _ckpt(tmp_path), "--ask", "salut", "--max_gen", "6", "--quiet", "--no-color"])
     out = capsys.readouterr().out
-    assert "octets lus" not in out
+    assert out.strip() != ""
+    for forbidden in ("octets lus", "[relis]", "✓", "⨯"):
+        assert forbidden not in out
