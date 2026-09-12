@@ -3,6 +3,13 @@
     python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --ask "Quelle est l'adresse ?"
     python -m relis.infer.cli --ckpt runs/tape1/last.pt --doc notes.md --doc api.py \\
         --conversation conv.json --ask "Où est le serveur ?"
+
+Attention (F6) : les épisodes d'entraînement comportent toujours au moins un tour
+d'historique ; un premier tour de conversation (sans `--conversation` existant, ou
+avec un fichier vide), avec ou sans `--doc` joint, est donc hors distribution — y
+compris la commande d'exemple ci-dessus. Pour une démonstration représentative,
+poser d'abord une question anodine, laisser `--conversation` l'enregistrer, puis
+poser la vraie question dans un second appel.
 """
 import argparse
 import datetime as _dt
