@@ -9,9 +9,9 @@ retenu.**
 | | |
 |---|---|
 | Pré-entraînement | **1,009 bit par octet** en validation, terminé |
-| Entraînement ruban | en cours, 1 500 pas, ≈ 23 h sur 2×T4 |
+| Entraînement ruban | session 1 terminée au pas 287, équilibrée **0,915** sur épisodes jamais vus ; session 2 vers 500 pas |
 | Modèle | 159,8 M paramètres, entraîné de zéro |
-| Dépôt | 192 tests, 64 commits |
+| Dépôt | 198 tests, plan 3 fusionné dans main |
 | Spécification | [`docs/superpowers/specs/2026-09-06-relis-design.md`](superpowers/specs/2026-09-06-relis-design.md) |
 
 ---
@@ -201,9 +201,15 @@ essentiellement zéro aux neuf autres. Marge de 962 contre 1 au hasard.
 | 26 | 0,673 | 66/133 | 62/62 | 0/27 | 0/30 |
 | 39 | 0,826 | 124/133 | 61/62 | 16/27 | 8/30 |
 | 52, épisodes **jamais vus** | **0,851** | 299/311 | 132/132 | 51/64 | 9/89 |
+| 287, épisodes **jamais vus** (fin de session 1) | **0,915** | 303/311 | 132/132 | 64/64 | 35/89 |
 
 Le score sur épisodes inédits dépasse celui de la validation : aucun surapprentissage, le mécanisme
 généralise. SKIP et REFRESH sont à 100 %.
+
+**Pas 287, fin de la première session (arrêt par budget de temps, 11,5 h).** STOP, SKIP, REFRESH et
+NEXT sont acquis ; la sonde STOP donne 1,000 au bon segment et 0,000 aux neuf autres. Seule la
+décision NOTE reste en retard, mais elle progresse encore (9 → 35 sur 89) : c'est la raison de la
+seconde session. Perte 0,18, validation 0,51 bit par octet sur les rubans.
 
 **NOTE reste à 10 %**, et la mesure est trop sévère pour lui : en forçage on exige l'émission à
 l'octet exact où l'oracle l'a placée, alors qu'à l'inférence il suffit de déclencher au bon moment
