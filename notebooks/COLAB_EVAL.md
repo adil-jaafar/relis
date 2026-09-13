@@ -33,8 +33,15 @@ rien sur le Hub.
 !python -m relis.eval.autonomy --repo jaafar2022/relis-v1-tape --n 200
 !python -m relis.eval.needle --repo jaafar2022/relis-v1-tape --sizes 1000,4000,16000,64000 --n 20
 !python -m relis.eval.adaptive --repo jaafar2022/relis-v1-tape --n 40
-!python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --ask "Quelle est l'adresse du serveur ?"
+!python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv.json --ask "Quelle est l'adresse du serveur ?" --max_gen 128
+!git checkout demo/conv.json
+!python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv.json --doc demo/notes_3.txt --doc demo/reunion_12.txt --ask "Dans quelle salle a lieu la réunion ?" --max_gen 128
+!git checkout demo/conv.json
 ```
+
+Les deux appels de la CLI partent de `demo/conv.json`, un historique de huit tours dans la forme vue à
+l'entraînement (voir `demo/README.md`) ; `git checkout` le remet à l'état initial après chaque appel,
+puisque la CLI y ajoute la question et la réponse.
 
 Sur GPU, ajouter `--device cuda` accélère nettement les deux premières évaluations (des centaines
 de tours de scan). Sans `--device`, chaque script détecte seul `cuda` si disponible, sinon `cpu`.
