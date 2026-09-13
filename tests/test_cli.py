@@ -56,3 +56,16 @@ def test_cli_quiet_prints_only_answer(tmp_path, capsys):
     assert out.strip() != ""
     for forbidden in ("octets lus", "[relis]", "✓", "⨯"):
         assert forbidden not in out
+
+
+def test_cli_warns_when_conversation_file_is_missing(tmp_path, capsys):
+    conv = tmp_path / "absent" / "conv.json"
+    cli.main(["--ckpt", _ckpt(tmp_path), "--ask", "bonjour",
+              "--conversation", str(conv), "--max_gen", "6", "--no-color"])
+    err = capsys.readouterr().err
+    assert "introuvable" in err and "hors distribution" in err
+
+
+def test_cli_warns_on_empty_history(tmp_path, capsys):
+    cli.main(["--ckpt", _ckpt(tmp_path), "--ask", "bonjour", "--max_gen", "6", "--no-color"])
+    assert "hors distribution" in capsys.readouterr().err

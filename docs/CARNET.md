@@ -9,8 +9,8 @@ retenu.**
 | | |
 |---|---|
 | Pré-entraînement | **1,009 bit par octet** en validation, terminé |
-| Entraînement ruban | session 1 terminée au pas 287, équilibrée **0,915** sur épisodes jamais vus ; session 2 vers 500 pas |
-| Autonomie (pas 287) | **200/200 arrêts exacts**, 47 % du contexte économisé, lecture ×4,67 sur les cas durs ; aiguille 0,95 à 1 ko puis chute au-delà de la longueur vue à l'entraînement |
+| Entraînement ruban | **terminé, 500 pas** en deux sessions (≈ 20 h sur 2×T4) ; équilibrée 0,927 en validation |
+| Autonomie (pas 500) | **200/200 arrêts exacts**, réponses justes 91,5 %, 47 % du contexte économisé, lecture ×4,67 sur les cas durs ; aiguille 0,95 à 1 ko puis chute au-delà de la longueur vue à l'entraînement |
 | Modèle | 159,8 M paramètres, entraîné de zéro |
 | Dépôt | 198 tests, plan 3 fusionné dans main |
 | Spécification | [`docs/superpowers/specs/2026-09-06-relis-design.md`](superpowers/specs/2026-09-06-relis-design.md) |
@@ -181,7 +181,7 @@ calcule les décisions exactes, et l'empaquetage en séquences de 16 384 octets.
 - Mélange du gradient : décisions 26 %, réponses 39 %, texte 35 %
 - Reprise depuis les poids du pré-entraînement, en chargement strict
 
-### 🟠 En cours — Entraînement ruban sur Kaggle
+### ✅ Entraînement ruban sur Kaggle — 500 pas
 
 Le modèle apprend à décider. C'est l'étape qui transforme un modèle de langage en machine à lire, et
 elle a réussi bien plus vite que prévu.
@@ -203,6 +203,7 @@ essentiellement zéro aux neuf autres. Marge de 962 contre 1 au hasard.
 | 39 | 0,826 | 124/133 | 61/62 | 16/27 | 8/30 |
 | 52, épisodes **jamais vus** | **0,851** | 299/311 | 132/132 | 51/64 | 9/89 |
 | 287, épisodes **jamais vus** (fin de session 1) | **0,915** | 303/311 | 132/132 | 64/64 | 35/89 |
+| 500, validation (fin de session 2) | **0,927** | 125/133 | 62/62 | 27/27 | 16/30 |
 
 Le score sur épisodes inédits dépasse celui de la validation : aucun surapprentissage, le mécanisme
 généralise. SKIP et REFRESH sont à 100 %.
@@ -249,22 +250,23 @@ Kaggle.
 - Mode d'emploi Colab (`notebooks/COLAB_EVAL.md`) pour exécuter les trois évaluations et une
   conversation d'essai sur un checkpoint réel
 
-**Premiers chiffres réels, checkpoint du pas 287** (Colab T4, `notebooks/COLAB_EVAL.md`), tous
-sans aucun arrêt par budget :
+**Chiffres réels, checkpoint final du pas 500** (Colab, `notebooks/COLAB_EVAL.md`), tous sans aucun
+arrêt par budget ; entre parenthèses, la valeur au pas 287 quand elle diffère :
 
 | Évaluation | Résultat |
 |---|---|
-| Autonomie, 200 épisodes jamais vus, sept familles | **200 arrêts exacts sur 200** (0 trop tôt, 0 trop tard, 0 document utile sauté) ; réponses justes 85,5 % ; 453 octets lus en moyenne, 47 % du contexte économisé |
-| Calcul adaptatif | cas faciles **98 octets** lus (justes 95 %), cas difficiles **458 octets** (justes 100 %) : **×4,67** |
+| Autonomie, 200 épisodes jamais vus, sept familles | **200 arrêts exacts sur 200** (0 trop tôt, 0 trop tard, 0 document utile sauté) ; réponses justes **91,5 %** (85,5 %) ; 453 octets lus en moyenne, 47 % du contexte économisé |
+| Calcul adaptatif | cas faciles **98 octets** lus (justes 100 %, contre 95 %), cas difficiles **458 octets** (justes 100 %) : **×4,67** |
 | Aiguille 1 ko | exactitude 0,95 |
-| Aiguille 4 ko | 0,35 |
+| Aiguille 4 ko | 0,35, inchangé entre 287 et 500 pas |
 | Aiguille 16 ko et 64 ko | 0,00 et 0,05, avec seulement 143 et 650 octets lus |
 
 Deux démonstrations sur trois tiennent : « il réfléchit plus quand c'est dur » (le modèle lit près de
 cinq fois plus quand la question l'exige) et la lecture des documents (aucun document utile sauté,
-aucun arrêt prématuré sur les familles à documents). Les 14,5 % de réponses fausses ne viennent pas
+aucun arrêt prématuré sur les familles à documents). Les 8,5 % de réponses fausses ne viennent pas
 de la lecture, qui s'arrête au bon endroit dans 100 % des cas, mais de la génération : la valeur
-copiée est parfois altérée. C'est la piste Extraits/RECALL du plan 2b.
+copiée est parfois altérée. Les 213 derniers pas ont fait passer ce chiffre de 14,5 % à 8,5 % sans
+rien changer aux décisions, déjà saturées. C'est la piste Extraits/RECALL du plan 2b.
 
 **« Il se souvient de très loin » ne tient pas encore, et la cause est connue.** Les épisodes
 d'entraînement ont entre 3 et 14 paires de tours, soit au plus 1 ko d'historique environ ; c'est
@@ -272,7 +274,8 @@ exactement la taille où l'aiguille réussit à 95 %. À 4 ko l'historique est q
 tout ce que le modèle a vu, à 64 ko cent fois. Il ne décroche pas parce que la Mémoire sature : il
 s'arrête après quelques segments, parce qu'il n'a jamais appris à maintenir CONT sur des centaines de
 segments. C'est un défaut de la distribution d'entraînement, pas de l'architecture, et il se corrige
-avec des épisodes à historique long (voir la suite).
+avec des épisodes à historique long (voir la suite). Preuve par l'absence : 213 pas de plus n'ont pas
+bougé l'aiguille d'un centième, ce sont bien les données qui manquent, pas les pas.
 
 Extraits et RECALL (copier exactement les noms, nombres et lignes lus dans les documents) et la
 sonde qui traduit le Buffer en français sont retirés du périmètre de ce plan : les deux exigent de

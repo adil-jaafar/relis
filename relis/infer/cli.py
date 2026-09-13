@@ -62,12 +62,25 @@ def _load_conversation(path):
     if path and os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f).get("turns", [])
+    if path:
+        print(f"[relis] conversation introuvable : {path} — on part d'un historique vide", file=sys.stderr)
     return []
+
+
+def _warn_if_empty(turns) -> None:
+    """Un historique vide est hors distribution (spec §9, F6) : le dire à l'écran plutôt que
+    laisser le lecteur prendre une récitation du gabarit d'entraînement pour une réponse."""
+    if not turns:
+        print("[relis] historique vide : premier tour, hors distribution de l'entraînement ; "
+              "les décisions et la réponse ne sont pas représentatives (voir demo/README.md)",
+              file=sys.stderr)
 
 
 def _save_conversation(path, turns):
     if not path:
         return
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"turns": turns}, f, ensure_ascii=False, indent=1)
 
@@ -105,6 +118,7 @@ def main(argv=None):
     turns = _load_conversation(args.conversation)
 
     def one(question: str) -> None:
+        _warn_if_empty(turns)
         events = ctl.turn(question.encode("utf-8"), history_segments(turns), docs)
         answer = TerminalRenderer(sys.stdout, args.color, args.quiet).run(events)
         turns.append({"role": "user", "text": question, "t": _stamp()})
