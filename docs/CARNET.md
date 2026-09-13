@@ -10,6 +10,7 @@ retenu.**
 |---|---|
 | Pré-entraînement | **1,009 bit par octet** en validation, terminé |
 | Entraînement ruban | session 1 terminée au pas 287, équilibrée **0,915** sur épisodes jamais vus ; session 2 vers 500 pas |
+| Autonomie (pas 287) | **200/200 arrêts exacts**, 47 % du contexte économisé, lecture ×4,67 sur les cas durs ; aiguille 0,95 à 1 ko puis chute au-delà de la longueur vue à l'entraînement |
 | Modèle | 159,8 M paramètres, entraîné de zéro |
 | Dépôt | 198 tests, plan 3 fusionné dans main |
 | Spécification | [`docs/superpowers/specs/2026-09-06-relis-design.md`](superpowers/specs/2026-09-06-relis-design.md) |
@@ -248,11 +249,30 @@ Kaggle.
 - Mode d'emploi Colab (`notebooks/COLAB_EVAL.md`) pour exécuter les trois évaluations et une
   conversation d'essai sur un checkpoint réel
 
-**Chiffres réels : à venir.** Le code et les 15 tests des évaluations sont en place et passent sur
-un modèle minuscule non entraîné (aucune exception, chiffres sans signification) ; les résultats
-sur le checkpoint Kaggle réel (`jaafar2022/relis-v1-tape`, encore en entraînement — voir la section
-précédente) seront reportés ici une fois les trois commandes exécutées via
-`notebooks/COLAB_EVAL.md`. Aucun chiffre n'est inventé en attendant.
+**Premiers chiffres réels, checkpoint du pas 287** (Colab T4, `notebooks/COLAB_EVAL.md`), tous
+sans aucun arrêt par budget :
+
+| Évaluation | Résultat |
+|---|---|
+| Autonomie, 200 épisodes jamais vus, sept familles | **200 arrêts exacts sur 200** (0 trop tôt, 0 trop tard, 0 document utile sauté) ; réponses justes 85,5 % ; 453 octets lus en moyenne, 47 % du contexte économisé |
+| Calcul adaptatif | cas faciles **98 octets** lus (justes 95 %), cas difficiles **458 octets** (justes 100 %) : **×4,67** |
+| Aiguille 1 ko | exactitude 0,95 |
+| Aiguille 4 ko | 0,35 |
+| Aiguille 16 ko et 64 ko | 0,00 et 0,05, avec seulement 143 et 650 octets lus |
+
+Deux démonstrations sur trois tiennent : « il réfléchit plus quand c'est dur » (le modèle lit près de
+cinq fois plus quand la question l'exige) et la lecture des documents (aucun document utile sauté,
+aucun arrêt prématuré sur les familles à documents). Les 14,5 % de réponses fausses ne viennent pas
+de la lecture, qui s'arrête au bon endroit dans 100 % des cas, mais de la génération : la valeur
+copiée est parfois altérée. C'est la piste Extraits/RECALL du plan 2b.
+
+**« Il se souvient de très loin » ne tient pas encore, et la cause est connue.** Les épisodes
+d'entraînement ont entre 3 et 14 paires de tours, soit au plus 1 ko d'historique environ ; c'est
+exactement la taille où l'aiguille réussit à 95 %. À 4 ko l'historique est quatre fois plus long que
+tout ce que le modèle a vu, à 64 ko cent fois. Il ne décroche pas parce que la Mémoire sature : il
+s'arrête après quelques segments, parce qu'il n'a jamais appris à maintenir CONT sur des centaines de
+segments. C'est un défaut de la distribution d'entraînement, pas de l'architecture, et il se corrige
+avec des épisodes à historique long (voir la suite).
 
 Extraits et RECALL (copier exactement les noms, nombres et lignes lus dans les documents) et la
 sonde qui traduit le Buffer en français sont retirés du périmètre de ce plan : les deux exigent de
@@ -266,7 +286,11 @@ Ce qui manque pour que les décisions apprises servent au-delà des épisodes sy
 scientifique qui rend la comparaison honnête.
 
 - Dialogues français publics, étiquetés par un modèle professeur sur Colab
-- Écart d'échelle : documents longs, historiques profonds, segments d'historique à sauter
+- **Historiques longs, en premier** (c'est ce qui manque à l'aiguille au-delà de 1 ko) : une
+  famille d'épisodes à 50-150 paires de tours qui tient dans les 15 ko d'un ruban, puis, pour
+  16 ko et au-delà, l'entraînement par fenêtres successives avec la Mémoire reportée d'une fenêtre à
+  la suivante, ce pour quoi l'architecture est faite
+- Écart d'échelle : documents longs, segments d'historique à sauter
 - Baseline Transformer sur octets, même taille et mêmes données. Elle coûte autant de GPU que RELIS,
   donc elle passe en dernier
 - Extraits et RECALL (copier exactement noms, nombres et lignes lus), reportés du plan 3 : exigent
