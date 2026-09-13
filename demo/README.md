@@ -30,7 +30,12 @@ serveur de `conv.json` : l'historique devient anodin, et le modèle passe aux do
 Chaque appel ajoute la question et la réponse à `conv.json` ; `git checkout demo/conv.json` le remet
 à l'état initial.
 
-`conv_anodine.json` est cette conversation sans le tour de l'adresse : la démo documents avec elle :
+`conv_anodine.json` est cette conversation sans le tour de l'adresse **et sans « Parlons de la
+réunion. »** : au pas 500, ce seul tour suffit à déclencher un STOP, le mot du sujet sans la réponse
+étant lui aussi un appât jamais vu comme tel à l'entraînement ; le modèle répond alors « je ne trouve
+pas cette information » sans ouvrir les documents. Avec un historique vraiment anodin, la sonde
+`relis.eval.distractor` (cas C et D) montre que le passage aux documents, le saut sur le nom et la
+lecture du bon document fonctionnent. La démo documents avec elle :
 
 ```
 python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv_anodine.json \

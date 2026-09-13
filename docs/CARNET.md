@@ -271,9 +271,25 @@ le modèle s'arrête **sur le même tour**, celui de l'adresse du serveur, et in
 ne répond pas à la question. Un modèle qui a appris « s'arrêter sur la première phrase en forme de
 fait » obtient donc les mêmes 200/200 qu'un modèle qui compare le fait à la question ; l'évaluation
 en autonomie ne distingue pas les deux. La sonde `relis.eval.distractor` (quatre cas construits à la
-main) tranche entre les hypothèses ; le remède, quelle qu'en soit l'issue, est une famille
-d'épisodes à faits distracteurs, ajoutée en tête du plan 2b avec les historiques longs. Même leçon
-que l'aiguille : les décisions sont apprises, mais seulement sur la diversité qu'on leur a montrée.
+main) a tranché au pas 500 :
+
+| Cas | Attendu | Obtenu |
+|---|---|---|
+| A, fait serveur récent, réponse salle plus ancienne | STOP sur la salle | **STOP sur le serveur**, réponse inventée |
+| B, le symétrique | STOP sur le serveur | **STOP sur la salle**, réponse incohérente |
+| C, historique anodin, réponse dans un document | NEXT, document lu | NEXT, `reunion_12` lu, **juste** |
+| D, fait serveur dans l'historique, réponse dans un document | NEXT, document lu | NEXT, `reunion_12` lu, **juste** |
+
+Le STOP est déclenché par la forme d'un fait dès qu'il est proche du début du balayage (A, B, la
+démo), et la question ne pèse que faiblement : dans D, le même fait placé deux tours plus loin ne
+déclenche plus. Second appât découvert par la démo : le tour « Parlons de la réunion. », le mot du
+sujet sans la réponse, déclenche un STOP suivi de « je ne trouve pas cette information », documents
+jamais ouverts. Les deux ont la même cause : aucun épisode d'entraînement ne contient de **négatif**,
+ni fait d'un autre sujet, ni mention du sujet sans sa valeur. Le remède est une famille de données,
+ajoutée en tête du plan suivant avec les historiques longs. Même leçon que l'aiguille : les décisions
+sont apprises, mais seulement sur la diversité qu'on leur a montrée. Ce que C et D prouvent en
+retour : quand l'historique est propre, la chaîne complète, lecture, NEXT, saut sur le nom, lecture
+du bon document, réponse exacte, fonctionne de bout en bout.
 
 Deux démonstrations sur trois tiennent : « il réfléchit plus quand c'est dur » (le modèle lit près de
 cinq fois plus quand la question l'exige) et la lecture des documents (aucun document utile sauté,
@@ -303,9 +319,10 @@ Ce qui manque pour que les décisions apprises servent au-delà des épisodes sy
 scientifique qui rend la comparaison honnête.
 
 - Dialogues français publics, étiquetés par un modèle professeur sur Colab
-- **Faits distracteurs, en premier** : dans toutes les familles, injecter un à trois faits d'un autre
-  sujet dans l'historique, pour que STOP soit conditionné à la question et non à la forme d'un fait
-  (le raté de la démo documents) ; régénérer les rubans, reprendre depuis le pas 500
+- **Négatifs, en premier** : dans toutes les familles, injecter des faits d'un autre sujet et des
+  mentions du sujet sans sa valeur, pour que STOP soit conditionné à la question et non à un appât
+  de surface (les deux ratés de la démo, confirmés par la sonde) ; régénérer les rubans, reprendre
+  depuis le pas 500
 - **Historiques longs, en même temps** (c'est ce qui manque à l'aiguille au-delà de 1 ko) : une
   famille d'épisodes à 50-150 paires de tours qui tient dans les 15 ko d'un ruban, puis, pour
   16 ko et au-delà, l'entraînement par fenêtres successives avec la Mémoire reportée d'une fenêtre à
