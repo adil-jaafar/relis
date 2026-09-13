@@ -261,6 +261,20 @@ arrêt par budget ; entre parenthèses, la valeur au pas 287 quand elle diffère
 | Aiguille 4 ko | 0,35, inchangé entre 287 et 500 pas |
 | Aiguille 16 ko et 64 ko | 0,00 et 0,05, avec seulement 143 et 650 octets lus |
 
+**La démonstration au terminal, sur `demo/conv.json`.** « Quelle est l'adresse du serveur ? » : le
+modèle lit les six tours les plus récents, s'arrête sur celui qui contient l'adresse, n'ouvre pas les
+documents et répond « L'adresse du serveur est 10.42.7.15. ». Exactement le comportement voulu.
+« Dans quelle salle a lieu la réunion ? », avec deux documents joints dont l'un contient la salle :
+le modèle s'arrête **sur le même tour**, celui de l'adresse du serveur, et invente une salle.
+
+**Ce que ce raté révèle.** Aucune des sept familles d'épisodes ne place dans l'historique un fait qui
+ne répond pas à la question. Un modèle qui a appris « s'arrêter sur la première phrase en forme de
+fait » obtient donc les mêmes 200/200 qu'un modèle qui compare le fait à la question ; l'évaluation
+en autonomie ne distingue pas les deux. La sonde `relis.eval.distractor` (quatre cas construits à la
+main) tranche entre les hypothèses ; le remède, quelle qu'en soit l'issue, est une famille
+d'épisodes à faits distracteurs, ajoutée en tête du plan 2b avec les historiques longs. Même leçon
+que l'aiguille : les décisions sont apprises, mais seulement sur la diversité qu'on leur a montrée.
+
 Deux démonstrations sur trois tiennent : « il réfléchit plus quand c'est dur » (le modèle lit près de
 cinq fois plus quand la question l'exige) et la lecture des documents (aucun document utile sauté,
 aucun arrêt prématuré sur les familles à documents). Les 8,5 % de réponses fausses ne viennent pas
@@ -289,7 +303,10 @@ Ce qui manque pour que les décisions apprises servent au-delà des épisodes sy
 scientifique qui rend la comparaison honnête.
 
 - Dialogues français publics, étiquetés par un modèle professeur sur Colab
-- **Historiques longs, en premier** (c'est ce qui manque à l'aiguille au-delà de 1 ko) : une
+- **Faits distracteurs, en premier** : dans toutes les familles, injecter un à trois faits d'un autre
+  sujet dans l'historique, pour que STOP soit conditionné à la question et non à la forme d'un fait
+  (le raté de la démo documents) ; régénérer les rubans, reprendre depuis le pas 500
+- **Historiques longs, en même temps** (c'est ce qui manque à l'aiguille au-delà de 1 ko) : une
   famille d'épisodes à 50-150 paires de tours qui tient dans les 15 ko d'un ruban, puis, pour
   16 ko et au-delà, l'entraînement par fenêtres successives avec la Mémoire reportée d'une fenêtre à
   la suivante, ce pour quoi l'architecture est faite

@@ -33,10 +33,11 @@ rien sur le Hub.
 !python -m relis.eval.autonomy --repo jaafar2022/relis-v1-tape --n 200
 !python -m relis.eval.needle --repo jaafar2022/relis-v1-tape --sizes 1000,4000,16000,64000 --n 20
 !python -m relis.eval.adaptive --repo jaafar2022/relis-v1-tape --n 40
+!python -m relis.eval.distractor --repo jaafar2022/relis-v1-tape
 !python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv.json --ask "Quelle est l'adresse du serveur ?" --max_gen 128
 !git checkout demo/conv.json
-!python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv.json --doc demo/notes_3.txt --doc demo/reunion_12.txt --ask "Dans quelle salle a lieu la réunion ?" --max_gen 128
-!git checkout demo/conv.json
+!python -m relis.infer.cli --repo jaafar2022/relis-v1-tape --conversation demo/conv_anodine.json --doc demo/notes_3.txt --doc demo/reunion_12.txt --ask "Dans quelle salle a lieu la réunion ?" --max_gen 128
+!git checkout demo/conv_anodine.json
 ```
 
 Les deux appels de la CLI partent de `demo/conv.json`, un historique de huit tours dans la forme vue à
